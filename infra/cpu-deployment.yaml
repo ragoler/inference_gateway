@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-cpu-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vllm-cpu-server
+  template:
+    metadata:
+      labels:
+        app: vllm-cpu-server
+        inference.networking.k8s.io/engine-type: vllm
+    spec:
+      containers:
+      - name: vllm
+        image: "vllm/vllm-openai-cpu:latest"
+        imagePullPolicy: Always
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+        - "--model"
+        - "${MODEL_NAME}"
+        - "--port"
+        - "8000"
+        - "--max-model-len"
+        - "4096"
+        env:
+        - name: PORT
+          value: "8000"
+        # Cap the CPU KV Cache to avoid OOMKilled errors
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "${KV_CACHE_SPACE}"
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        livenessProbe:
+          failureThreshold: 240
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 1
+        readinessProbe:
+          failureThreshold: 600
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: "4"
+            memory: "20Gi"
+            ephemeral-storage: "10Gi"
+          requests:
+            cpu: "4"
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: shm
+      volumes:
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 4Gi
+      restartPolicy: Always

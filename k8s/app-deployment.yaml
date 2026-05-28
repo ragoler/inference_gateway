@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-client-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway-client-app
+  template:
+    metadata:
+      labels:
+        app: gateway-client-app
+    spec:
+      containers:
+      - name: app
+        image: "${REGISTRY}/gateway-client-app:latest"
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        - name: GATEWAY_IP
+          value: "${GATEWAY_IP}"
+        - name: MODEL_NAME
+          value: "${MODEL_NAME}"
