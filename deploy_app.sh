@@ -48,6 +48,7 @@ export REGISTRY="${REGISTRY}"
 export GATEWAY_IP="${GATEWAY_IP}"
 export MODEL_NAME="${MODEL_NAME}"
 
+kubectl apply -f k8s/rbac.yaml
 envsubst < k8s/app-deployment.yaml | kubectl apply -f -
 kubectl apply -f k8s/app-service.yaml
 

@@ -12,6 +12,7 @@ spec:
       labels:
         app: gateway-client-app
     spec:
+      serviceAccountName: gateway-client-sa
       containers:
       - name: app
         image: "${REGISTRY}/gateway-client-app:latest"
