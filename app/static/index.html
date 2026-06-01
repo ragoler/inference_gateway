@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GKE Inference Gateway: Cache Magic</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Persistent "last routed" ring + animated flow pulse */
+        @keyframes routePulse {
+            0% { box-shadow: 0 0 0 0 rgba(56,189,248,0.5); }
+            70% { box-shadow: 0 0 0 12px rgba(56,189,248,0); }
+            100% { box-shadow: 0 0 0 0 rgba(56,189,248,0); }
+        }
+        .route-pulse { animation: routePulse 1.4s ease-out 2; }
+        @keyframes flowDash { to { stroke-dashoffset: -16; } }
+        .flow-anim { stroke-dasharray: 6 6; animation: flowDash 0.6s linear infinite; }
+    </style>
 </head>
 <body class="bg-slate-900 text-white font-sans min-h-screen flex flex-col">
     <!-- Header -->
@@ -24,55 +35,70 @@
     <!-- Main Grid -->
     <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 p-6">
         <!-- Left Column: Input Playground (5 cols) -->
-        <section class="lg:col-span-5 bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col space-y-6">
+        <section class="lg:col-span-5 bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col space-y-5">
             <div>
-                <h2 class="text-lg font-semibold text-sky-400 mb-1">1. Ingest Reference Context</h2>
-                <p class="text-sm text-slate-400 mb-4">Load dense context to fill the CPU KV Cache.</p>
-                
+                <h2 class="text-lg font-semibold text-sky-400 mb-1">1. Reference Context (the shared prefix)</h2>
+                <p class="text-sm text-slate-400 mb-3">Load or type a document. It is sent as the <strong>prefix</strong> of your request &mdash; reusing it is what triggers a cache hit.</p>
+
                 <!-- Preset Contexts -->
-                <div class="grid grid-cols-2 gap-3 mb-4">
+                <div class="grid grid-cols-3 gap-2 mb-3">
                     <button onclick="loadPreset('Alpha')" class="preset-btn p-3 text-left rounded-lg border border-slate-700 hover:border-sky-400 transition bg-slate-800/50 flex flex-col">
-                        <span class="font-medium text-sky-400">Context Alpha</span>
-                        <span class="text-xs text-slate-500 mt-1">Financial Spec (Blue Stream)</span>
+                        <span class="font-medium text-sky-400">Alpha</span>
+                        <span class="text-[11px] text-slate-500 mt-1">Financial</span>
                     </button>
                     <button onclick="loadPreset('Beta')" class="preset-btn p-3 text-left rounded-lg border border-slate-700 hover:border-emerald-400 transition bg-slate-800/50 flex flex-col">
-                        <span class="font-medium text-emerald-400">Context Beta</span>
-                        <span class="text-xs text-slate-500 mt-1">Medical Report (Green Stream)</span>
+                        <span class="font-medium text-emerald-400">Beta</span>
+                        <span class="text-[11px] text-slate-500 mt-1">Clinical</span>
+                    </button>
+                    <button onclick="loadPreset('Gamma')" class="preset-btn p-3 text-left rounded-lg border border-slate-700 hover:border-fuchsia-400 transition bg-slate-800/50 flex flex-col">
+                        <span class="font-medium text-fuchsia-400">Gamma</span>
+                        <span class="text-[11px] text-slate-500 mt-1">Eng. Spec</span>
                     </button>
                 </div>
 
-                <!-- Drag and Drop Zone -->
-                <div id="drop-zone" class="border-2 border-dashed border-slate-600 hover:border-sky-400/80 rounded-xl p-6 text-center cursor-pointer transition bg-slate-900/30">
-                    <p class="text-sm text-slate-400">Drag and drop custom .txt file here</p>
-                    <p class="text-xs text-slate-500 mt-1">or click to browse</p>
+                <!-- Drag and Drop Zone (compact) -->
+                <div id="drop-zone" class="border-2 border-dashed border-slate-600 hover:border-sky-400/80 rounded-lg p-3 text-center cursor-pointer transition bg-slate-900/30 mb-3">
+                    <p class="text-xs text-slate-400">Drag &amp; drop a .txt file, or click to browse</p>
                     <input type="file" id="file-input" class="hidden" accept=".txt" />
                 </div>
-                <div id="active-doc" class="mt-2 text-xs text-sky-300 hidden font-mono bg-sky-900/20 p-2 rounded border border-sky-800"></div>
+
+                <!-- Editable Context -->
+                <div class="flex justify-between items-center mb-1">
+                    <div class="flex items-center space-x-2">
+                        <label class="text-xs font-medium text-slate-400">Context text (editable)</label>
+                        <span id="ctx-label" class="hidden text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border"></span>
+                    </div>
+                    <span id="ctx-tokens" class="text-xs font-mono text-slate-500">~0 tokens</span>
+                </div>
+                <textarea id="context-input" rows="8" oninput="updateCtxTokens()"
+                    class="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs text-slate-200 font-mono leading-relaxed focus:outline-none focus:border-sky-400 transition resize-y"
+                    placeholder="Pick a preset above, drop a file, or type/paste your own context here. Tip: keep it over ~128 tokens or prefix caching will not engage."></textarea>
             </div>
 
-            <!-- Follow-up Question -->
-            <div class="flex-1 flex flex-col justify-between">
-                <div>
-                    <h2 class="text-lg font-semibold text-sky-400 mb-1">2. Execute Inference Request</h2>
-                    <p class="text-sm text-slate-400 mb-3">Send prompt through the Gateway to evaluate latency.</p>
-                    <textarea id="prompt-input" rows="3" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-white focus:outline-none focus:border-sky-400 transition resize-none" placeholder="Ask a question about the loaded context..."></textarea>
-                </div>
+            <!-- Question -->
+            <div>
+                <h2 class="text-lg font-semibold text-sky-400 mb-1">2. Ask a Question</h2>
+                <p class="text-sm text-slate-400 mb-2">Sent as <span class="font-mono text-slate-300">context + question</span> through the Gateway.</p>
+                <textarea id="prompt-input" rows="2" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-white focus:outline-none focus:border-sky-400 transition resize-none" placeholder="Ask a question about the loaded context..."></textarea>
 
-                <!-- Controls -->
-                <div class="mt-4 flex space-x-3">
+                <div class="mt-3 flex items-center space-x-3">
                     <button onclick="executeRequest()" id="submit-btn" class="flex-1 bg-sky-500 hover:bg-sky-600 text-white font-medium py-3 rounded-lg transition shadow-lg shadow-sky-500/20 flex items-center justify-center space-x-2">
                         <span>Send Request</span>
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
                     </button>
-                    <button onclick="simulateEviction()" class="px-4 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 text-amber-400 text-xs font-medium rounded-lg transition">
-                        Force Eviction
+                    <button onclick="newRun()" id="newrun-btn" title="Start a fresh cold demo run" class="px-4 py-3 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium rounded-lg transition flex items-center space-x-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                        <span>New Run</span>
                     </button>
+                    <span id="inflight" class="text-xs font-mono text-slate-500 whitespace-nowrap">idle</span>
                 </div>
+                <p class="mt-2 text-[11px] text-slate-500">Fire several requests without waiting. Same context twice &rarr; follow-up hits the same pod at lower TTFT. <strong>New Run</strong> makes everything cold again (fresh session prefix) so you can re-demo without restarting pods.</p>
+                <p id="session-tag" class="mt-1 text-[10px] font-mono text-slate-600"></p>
             </div>
         </section>
 
         <!-- Right Column: Telemetry Visualizer (7 cols) -->
-        <section class="lg:col-span-7 flex flex-col space-y-6">
+        <section class="lg:col-span-7 flex flex-col space-y-5">
             <!-- Gateway Routing Hub Overlay -->
             <div class="bg-slate-800 rounded-xl p-4 border border-slate-700 flex flex-col items-center justify-center relative overflow-hidden">
                 <div class="absolute inset-0 bg-gradient-to-r from-sky-500/5 via-transparent to-emerald-500/5 pointer-events-none"></div>
@@ -81,16 +107,29 @@
                     <span class="text-sm font-medium text-white">GKE Inference Gateway + EPP</span>
                     <span id="routing-stream" class="text-xs px-3 py-1 rounded-full bg-slate-900 border border-slate-700 text-slate-400 font-mono transition-all">Idle</span>
                 </div>
+                <span class="text-[11px] text-slate-500 mt-1">prefix-cache-scorer (w3) &middot; queue-scorer (w2) &middot; kv-utilization-scorer (w2)</span>
             </div>
 
             <!-- Physical Pod Dashboards -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 flex-1" id="nodes-grid">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6" id="nodes-grid">
                 <!-- Populated dynamically by app.js -->
+            </div>
+
+            <!-- Time-to-First-Token Graph (real measurements) -->
+            <div class="bg-slate-800 rounded-xl p-4 border border-slate-700">
+                <div class="flex justify-between items-center mb-3">
+                    <h3 class="text-sm font-semibold text-slate-300">Time-to-First-Token (measured)</h3>
+                    <div class="flex items-center space-x-3 text-[10px] font-mono">
+                        <span class="flex items-center"><span class="w-2 h-2 rounded-sm bg-sky-400 mr-1"></span>cache hit</span>
+                        <span class="flex items-center"><span class="w-2 h-2 rounded-sm bg-amber-400 mr-1"></span>cold prefill</span>
+                    </div>
+                </div>
+                <div id="ttft-graph" class="flex items-end space-x-2 h-28"></div>
             </div>
 
             <!-- Telemetry Feed / Logs -->
             <div class="bg-slate-900 rounded-xl p-4 border border-slate-800 font-mono text-xs text-slate-400 h-32 overflow-y-auto flex flex-col space-y-1.5" id="log-feed">
-                <div class="text-slate-600">System ready. Awaiting reference context injection...</div>
+                <div class="text-slate-600">System ready. Load a context to begin...</div>
             </div>
         </section>
     </main>

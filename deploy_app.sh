@@ -21,8 +21,8 @@ gcloud artifacts repositories create "$REPO_NAME" \
 echo "=== Authenticating Docker ==="
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
-echo "=== Building Application Image ==="
-docker build -t "${REGISTRY}/gateway-client-app:latest" ./app
+echo "=== Building Application Image (linux/amd64 for GKE nodes) ==="
+docker build --platform linux/amd64 -t "${REGISTRY}/gateway-client-app:latest" ./app
 
 echo "=== Pushing Application Image ==="
 docker push "${REGISTRY}/gateway-client-app:latest"
@@ -49,8 +49,15 @@ export GATEWAY_IP="${GATEWAY_IP}"
 export MODEL_NAME="${MODEL_NAME}"
 
 kubectl apply -f k8s/rbac.yaml
-envsubst < k8s/app-deployment.yaml | kubectl apply -f -
+# Portable variable substitution (envsubst is not installed by default on macOS).
+python3 -c "import os,sys; sys.stdout.write(os.path.expandvars(open('k8s/app-deployment.yaml').read()))" | kubectl apply -f -
 kubectl apply -f k8s/app-service.yaml
+
+# The image tag stays :latest, so an unchanged Deployment spec won't trigger a
+# new pull. Force a rollout to pick up the freshly pushed image.
+echo "=== Rolling out new image ==="
+kubectl rollout restart deployment/gateway-client-app
+kubectl rollout status deployment/gateway-client-app --timeout=180s
 
 echo "=== Application Deployed ==="
 echo "You can discover the service IP by running: kubectl get svc gateway-client-app-svc"

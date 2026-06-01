@@ -70,6 +70,14 @@ helm upgrade --install ${INFERENCE_POOL_NAME} \
  --version ${IGW_CHART_VERSION} \
  oci://us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/charts/inferencepool
 
+echo "=== Step 7: Tuning EPP scorer weights for prefix-cache affinity ==="
+# Override the Helm-generated EPP ConfigMap so prefix-cache routing is dominant,
+# then restart the EPP to load it.
+export INFERENCE_POOL_NAME
+envsubst < infra/epp-config.yaml | kubectl apply -f -
+kubectl rollout restart deployment/${INFERENCE_POOL_NAME}-epp
+kubectl rollout status deployment/${INFERENCE_POOL_NAME}-epp --timeout=120s
+
 echo "=== Setup Complete ==="
 echo "Waiting for Gateway to receive an external IP address (this may take 3-5 minutes)..."
 echo "You can check the status by running: kubectl get gateway ${GATEWAY_NAME}"

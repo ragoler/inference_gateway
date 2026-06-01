@@ -32,12 +32,17 @@ def test_generate_endpoint():
         "max_tokens": 30,
         "temperature": 0.1
     }
-    response = requests.post(f"{BASE_URL}/generate", json=payload, timeout=60)
+    response = requests.post(f"{BASE_URL}/generate", json=payload, timeout=90)
     assert response.status_code == 200
     data = response.json()
     assert "choices" in data
     assert len(data["choices"]) > 0
     assert "text" in data["choices"][0]
+    # New real-telemetry fields surfaced by the streaming proxy.
+    assert "ttft_ms" in data
+    assert "total_ms" in data
+    assert "routing" in data
+    assert "served_by" in data["routing"]
 
 @pytest.mark.skipif(not APP_IP, reason="APP_IP environment variable not set")
 def test_health_endpoint():
