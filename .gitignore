@@ -129,6 +129,11 @@ bin/
 .idea/
 .vscode/
 
+# Claude Code local state / agent files
+.claude/
+.claude
+.pytest_cache/
+
 # Spyder project settings
 .spyderproject
 .spyproject
