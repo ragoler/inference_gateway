@@ -25,15 +25,26 @@ spec:
         - "8000"
         - "--max-model-len"
         - "4096"
+        # Publish KV-cache events over ZMQ so an llm-d-style indexer can track
+        # exactly which prefix blocks live on which pod (event-driven routing).
+        - "--kv-events-config"
+        - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","topic":"kv@$(POD_IP):5557@${MODEL_NAME}"}'
         env:
         - name: PORT
           value: "8000"
         # Cap the CPU KV Cache to avoid OOMKilled errors
         - name: VLLM_CPU_KVCACHE_SPACE
           value: "${KV_CACHE_SPACE}"
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         ports:
         - containerPort: 8000
           name: http
+          protocol: TCP
+        - containerPort: 5557
+          name: kv-events
           protocol: TCP
         livenessProbe:
           failureThreshold: 240
