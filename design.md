@@ -87,13 +87,15 @@ the gateway/EPP/**app** run on a small **on-demand default pool** so the app sta
 *report* provisioning even while the model node is being created or replaced.
 
 ```
-gpu-flex:  G4 spot → G4 on-demand → G2 spot → G2 on-demand
-cpu-flex:  e4 spot → e4 on-demand → e2 spot → e2 on-demand
+gpu-flex:  G4 spot → G4 on-demand → G2 spot → G2 on-demand   (each tier carries a gpu block:
+                                                              G4=nvidia-rtx-pro-6000, G2=nvidia-l4)
+cpu-flex:  e2 → e4 → n4   (each spot → on-demand)
 both:      nodePoolAutoCreation: enabled ; activeMigration (return to higher tier when freed)
 ```
-*(G2 = NVIDIA L4; "G4" is the newer small-GPU family — confirm exact GKE machine type at
-build. "e4" family name to confirm; e2 is the current proven family. Order prefers the
-newer/preferred family, falling back to the more-available one — mirrored across CPU & GPU.)*
+*(G2 = NVIDIA L4; G4 = NVIDIA RTX PRO 6000 Blackwell — needs driver 580+ and GKE
+≥1.34.1-gke.1279000 for NAP; full-G4 zonal availability isn't guaranteed, so it falls back to
+G2/L4. CPU: e2 is the proven/available family (first); e4 is the newer option if it exists; n4
+is a valid modern fallback so provisioning still succeeds if "e4" is unavailable.)*
 
 If every tier is unavailable, model pods stay `Pending` (we **wait for capacity** — no
 auto cross-backend fallback) and the UI shows "provisioning".

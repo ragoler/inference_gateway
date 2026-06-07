@@ -30,8 +30,8 @@ The system architecture is divided into three primary layers:
 ├── infra/
 │   ├── cpu-deployment.yaml  # CPU vLLM model server (ComputeClass + KV events over ZMQ)
 │   ├── gpu-deployment.yaml  # GPU vLLM model server (nvidia.com/gpu, gpu-flex ComputeClass)
-│   ├── computeclass-cpu.yaml # CPU Custom Compute Class (e2/e4 spot -> on-demand)
-│   ├── computeclass-gpu.yaml # GPU Custom Compute Class (G4 -> G2, spot -> on-demand)
+│   ├── computeclass-cpu.yaml # CPU Custom Compute Class (e2 -> e4 -> n4, spot -> on-demand)
+│   ├── computeclass-gpu.yaml # GPU Custom Compute Class (G4 -> G2, spot -> on-demand; gpu blocks)
 │   ├── epp-config.yaml      # Vanilla EPP scorer weights (kept as rollback target)
 │   ├── llm-d-epp.yaml       # llm-d precise prefix-cache routing EPP (active; image pinned by digest)
 │   ├── inference-objective.yaml # Request priority/criticality (InferenceObjective)

@@ -2,10 +2,11 @@
 # Model-server pods select this via nodeSelector cloud.google.com/compute-class: cpu-flex.
 # Requires Node Auto-Provisioning enabled on the cluster.
 #
-# NOTE: confirm the exact GKE machine family names. "e2" is valid/available today;
-# "e4" should be verified (GCP general-purpose families include e2, n4, c4 — replace
-# "e4" with the intended newer family if needed). e2 is listed first so the CPU stack
-# provisions even before "e4" is confirmed.
+# Fallback order (each spot -> on-demand):
+#   e2  -> proven, broadly available (matches the existing demo cluster); listed first
+#   e4  -> newer general-purpose family IF it exists (confirm — GCP families are e2/n2/n4/c4…)
+#   n4  -> valid modern fallback so provisioning still succeeds if "e4" is unavailable
+# n2 is an equally fine substitute for n4 if you prefer the broadest availability.
 apiVersion: cloud.google.com/v1
 kind: ComputeClass
 metadata:
@@ -19,6 +20,10 @@ spec:
     - machineFamily: e4
       spot: true
     - machineFamily: e4
+      spot: false
+    - machineFamily: n4
+      spot: true
+    - machineFamily: n4
       spot: false
   nodePoolAutoCreation:
     enabled: true
