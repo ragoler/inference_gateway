@@ -1,11 +1,14 @@
-# GPU Custom Compute Class: prefer the newer small GPU (G4) on spot, fall back to
-# on-demand, then to G2 (NVIDIA L4) spot, then G2 on-demand. Model-server pods select
-# this via nodeSelector cloud.google.com/compute-class: gpu-flex. Requires Node
-# Auto-Provisioning enabled on the cluster.
+# GPU Custom Compute Class: prefer the newer small GPU (G4 = NVIDIA RTX PRO 6000
+# Blackwell) on spot, fall back to on-demand, then to G2 (NVIDIA L4) spot, then G2
+# on-demand. Model-server pods select this via nodeSelector
+# cloud.google.com/compute-class: gpu-flex. Requires Node Auto-Provisioning.
 #
-# NOTE: confirm the exact GKE GPU machine types. G2 = NVIDIA L4 (g2-standard-*). "G4" is
-# the newer small-GPU family — verify its machine family/type and per-node GPU count, and
-# switch machineFamily -> machineType (e.g., g2-standard-8) if NAP needs the explicit type.
+# Each GPU priority MUST carry a `gpu` block (type + count); machineFamily is optional
+# and just narrows the search. Accelerator type strings: G4 = nvidia-rtx-pro-6000,
+# G2 = nvidia-l4. RTX PRO 6000 needs driver 580+, so the G4 tiers use driverVersion: latest.
+#
+# NOTE: full-G4 regional availability is not guaranteed in every zone; if NAP cannot
+# provision G4 in this zone, it falls through to the G2/L4 tiers automatically.
 apiVersion: cloud.google.com/v1
 kind: ComputeClass
 metadata:
@@ -13,12 +16,28 @@ metadata:
 spec:
   priorities:
     - machineFamily: g4
+      gpu:
+        type: nvidia-rtx-pro-6000
+        count: 1
+        driverVersion: latest
       spot: true
     - machineFamily: g4
+      gpu:
+        type: nvidia-rtx-pro-6000
+        count: 1
+        driverVersion: latest
       spot: false
     - machineFamily: g2
+      gpu:
+        type: nvidia-l4
+        count: 1
+        driverVersion: default
       spot: true
     - machineFamily: g2
+      gpu:
+        type: nvidia-l4
+        count: 1
+        driverVersion: default
       spot: false
   nodePoolAutoCreation:
     enabled: true

@@ -17,9 +17,10 @@ spec:
     spec:
       # GPU model servers run on the gpu-flex ComputeClass (G4 spot -> G4 on-demand
       # -> G2 spot -> G2 on-demand). See infra/computeclass-gpu.yaml.
+      # Driver version is set per-tier by the gpu-flex ComputeClass (G4 -> latest,
+      # G2 -> default), so we don't pin it here.
       nodeSelector:
         cloud.google.com/compute-class: gpu-flex
-        cloud.google.com/gke-gpu-driver-version: default
       tolerations:
       - key: cloud.google.com/gke-spot
         operator: Equal

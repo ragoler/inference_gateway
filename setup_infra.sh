@@ -98,8 +98,10 @@ echo "=== Step 1: Creating GKE Cluster ==="
 # the gateway controller, EPP, and the app; model servers land on ComputeClass nodes.
 NAP_FLAGS="--enable-autoprovisioning --min-cpu 0 --max-cpu ${MAX_CPU:-200} --min-memory 0 --max-memory ${MAX_MEMORY:-2000}"
 if [ "$BACKEND" = "gpu" ]; then
-  # Confirm accelerator type(s) for your G4/G2 selection (nvidia-l4 = G2/L4).
-  NAP_FLAGS="${NAP_FLAGS} --max-accelerator type=${GPU_ACCELERATOR_TYPE:-nvidia-l4},count=${MAX_GPU:-8}"
+  # NAP must allow BOTH GPU types the gpu-flex ComputeClass can pick:
+  # G4 = nvidia-rtx-pro-6000 (preferred), G2 = nvidia-l4 (fallback).
+  NAP_FLAGS="${NAP_FLAGS} --max-accelerator type=${GPU_ACCELERATOR_TYPE:-nvidia-rtx-pro-6000},count=${MAX_GPU:-8}"
+  NAP_FLAGS="${NAP_FLAGS} --max-accelerator type=${GPU_ACCELERATOR_TYPE_FALLBACK:-nvidia-l4},count=${MAX_GPU:-8}"
 fi
 if gcloud container clusters describe "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
   echo "Cluster ${CLUSTER_NAME} already exists. Skipping creation."
