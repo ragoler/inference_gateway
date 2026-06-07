@@ -30,7 +30,8 @@ The system architecture is divided into three primary layers:
 ├── infra/
 │   ├── cpu-deployment.yaml  # vLLM model server (+ KV-cache event publishing over ZMQ)
 │   ├── epp-config.yaml      # Vanilla EPP scorer weights (kept as rollback target)
-│   ├── llm-d-epp.yaml       # llm-d precise prefix-cache routing EPP (active Endpoint Picker)
+│   ├── llm-d-epp.yaml       # llm-d precise prefix-cache routing EPP (active; image pinned by digest)
+│   ├── inference-objective.yaml # Request priority/criticality (InferenceObjective)
 │   └── gateway.yaml         # External L7 Gateway definition
 ├── k8s/
 │   ├── app-deployment.yaml  # FastAPI application Deployment manifest
@@ -116,6 +117,27 @@ kubectl patch inferencepool vllm-cpu-server --type merge \
 
 > Note: this is the *precise prefix-cache routing* slice of llm-d, deployed as plain
 > manifests (no Helm). P/D disaggregation (GPU + RDMA/NIXL) is out of scope for this CPU demo.
+
+### Routing reliability (read this)
+
+Prefix-cache routing is **probabilistic** — the same scoring approach GKE's official
+Inference Gateway uses. It is designed for many replicas with autoscaling; on **2 CPU
+pods with a presenter sending one request at a time** it is the hardest case, so affinity
+is strong-but-not-perfect. We maximize it by:
+
+- **Long preset contexts (~450 tokens ≈ 3+ blocks)** so a repeat matches several full
+  blocks → a decisive prefix score. Short prompts (<128 tokens) cache nothing and route
+  by load — the single biggest cause of "it went to the wrong pod."
+- **`prefix-cache-scorer` weight 15** vs load scorers at 1 — prefix dominates unless a
+  pod is truly overloaded.
+
+Cache hit/miss and served-pod in the UI come from vLLM counter deltas; the app only
+reports them when one pod **clearly dominates** the window and a **meaningful fraction** of
+blocks were reused (avoids false "hit" labels under overlapping requests).
+
+**Latency:** the first response to a cold prefix is real CPU **prefill** (~10–20s) — vLLM
+only reports the request as "running" once prefill ends, so the gap between routing and the
+worker showing activity is expected. A warm cache hit returns in ~1–3s.
 
 > ⚠️ **Prefix caching is block-aligned (block size = 128 tokens).** Prompts shorter than one
 > block cache nothing and show no affinity. The UI's preset contexts are intentionally long

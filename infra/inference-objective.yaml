@@ -1,0 +1,25 @@
+# InferenceObjective declares per-workload request priority (criticality) within
+# the InferencePool. Under saturation, the Inference Gateway's flow control sheds
+# lower-priority requests first. This showcases a core Inference Gateway feature
+# (it replaced the deprecated InferenceModel). Single-model demo: declarative only.
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceObjective
+metadata:
+  name: interactive
+  namespace: default
+spec:
+  priority: 10
+  poolRef:
+    group: inference.networking.k8s.io
+    name: vllm-cpu-server
+---
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceObjective
+metadata:
+  name: batch
+  namespace: default
+spec:
+  priority: 0
+  poolRef:
+    group: inference.networking.k8s.io
+    name: vllm-cpu-server

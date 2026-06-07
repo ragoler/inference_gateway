@@ -89,6 +89,9 @@ kubectl rollout status deployment/vllm-cpu-server-epp-llmd --timeout=180s
 kubectl patch inferencepool ${INFERENCE_POOL_NAME} --type merge \
   -p '{"spec":{"endpointPickerRef":{"name":"vllm-cpu-server-epp-llmd"}}}'
 
+echo "=== Step 9: Declaring InferenceObjectives (request priority / criticality) ==="
+kubectl apply -f infra/inference-objective.yaml
+
 echo "=== Setup Complete ==="
 echo "Waiting for Gateway to receive an external IP address (this may take 3-5 minutes)..."
 echo "You can check the status by running: kubectl get gateway ${GATEWAY_NAME}"

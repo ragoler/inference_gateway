@@ -226,21 +226,34 @@ def compute_routing(before: dict, after: dict) -> dict:
     Reliable for presenter-paced (one-at-a-time) demos; under heavy concurrent
     traffic deltas can blend across requests.
     """
-    served_by = None
-    queries_delta = 0.0
-    hits_delta = 0.0
+    # Rank pods by how many prefix-cache blocks they queried during the window.
+    deltas = []
     for name, post in after.items():
         pre = before.get(name, {})
-        delta = post.get("prefix_queries", 0.0) - pre.get("prefix_queries", 0.0)
-        if delta > queries_delta:
-            queries_delta = delta
-            served_by = name
-            hits_delta = post.get("prefix_hits", 0.0) - pre.get("prefix_hits", 0.0)
+        dq = post.get("prefix_queries", 0.0) - pre.get("prefix_queries", 0.0)
+        dh = post.get("prefix_hits", 0.0) - pre.get("prefix_hits", 0.0)
+        deltas.append((dq, dh, name))
+    deltas.sort(reverse=True)
+
+    served_by = None
+    queries_delta = hits_delta = 0.0
+    dominant = False
+    if deltas and deltas[0][0] > 0:
+        queries_delta, hits_delta, served_by = deltas[0]
+        second = deltas[1][0] if len(deltas) > 1 else 0.0
+        # "Dominant" = this pod clearly accounts for the request: a real number of
+        # block queries AND well ahead of any other pod's. Otherwise attribution
+        # is ambiguous (overlap/noise) and we don't trust the served_by/hit.
+        dominant = queries_delta >= 16 and queries_delta >= 3 * second
+
     hit_ratio = (hits_delta / queries_delta) if queries_delta > 0 else 0.0
+    # Only call it a cache hit if a meaningful fraction of blocks were reused
+    # (filters stray single-block hits that the old `>0` test misreported).
+    cache_hit = dominant and hit_ratio >= 0.15
     return {
-        "available": served_by is not None,
-        "served_by": served_by,
-        "cache_hit": served_by is not None and hits_delta > 0,
+        "available": served_by is not None and dominant,
+        "served_by": served_by if dominant else None,
+        "cache_hit": cache_hit,
         "queries_delta": queries_delta,
         "hits_delta": hits_delta,
         "hit_ratio": round(hit_ratio, 3),
