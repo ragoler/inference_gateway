@@ -35,6 +35,7 @@ let ttftHistory = [];       // {ttft, hit, label}
 let sessionNonce = "";      // prepended to contexts; bumping it makes caches cold
 let sessionBaseline = {};   // {pod: {queries, hits}} captured at New Run for session hit-rate
 let latestNodes = [];       // last telemetry snapshot
+let prevEvictions = {};     // pod -> last eviction count, to detect new evictions
 
 document.addEventListener("DOMContentLoaded", () => {
     setupDropZone();
@@ -174,6 +175,8 @@ function renderNodes(nodes) {
         const hitPct = sQ > 0 ? Math.round((sH / sQ) * 100) : 0;
         const running = node.running || 0;
         const cachedTokens = node.cached_tokens || 0;
+        const blocksCached = node.blocks_cached || 0;   // llm-d KV index (ground truth)
+        const evictions = node.evictions || 0;
         const isLastRouted = lastRouting && lastRouting.served_by === node.name;
         const routedHit = isLastRouted && lastRouting.hit;
 
@@ -220,6 +223,14 @@ function renderNodes(nodes) {
             <!-- Real serving stats -->
             <div class="pt-2 border-t border-slate-700/50 grid grid-cols-2 gap-y-2 text-xs">
                 <div class="flex flex-col">
+                    <span class="text-slate-500">KV blocks held <span class="text-slate-600">(llm-d index)</span></span>
+                    <span class="font-mono text-sky-300">${blocksCached.toLocaleString()}</span>
+                </div>
+                <div class="flex flex-col">
+                    <span class="text-slate-500">Evictions</span>
+                    <span class="font-mono ${evictions > 0 ? 'text-amber-400' : 'text-slate-400'}">${evictions.toLocaleString()}</span>
+                </div>
+                <div class="flex flex-col">
                     <span class="text-slate-500">Cached tokens</span>
                     <span class="font-mono text-slate-300">${cachedTokens.toLocaleString()}</span>
                 </div>
@@ -234,6 +245,16 @@ function renderNodes(nodes) {
             </div>
         `;
         container.appendChild(card);
+
+        // Real eviction signal from vLLM KV events: flash + log when blocks are evicted.
+        if (node.name in prevEvictions && evictions > prevEvictions[node.name]) {
+            const n = evictions - prevEvictions[node.name];
+            const podShort = node.name.replace(/^vllm-cpu-server-[^-]+-/, "");
+            logEvent(`⚠ LRU eviction on pod ${podShort}: ${n} KV block(s) evicted (cache saturated).`, true);
+            card.classList.add("border-amber-400", "bg-amber-950/30");
+            setTimeout(() => card.classList.remove("border-amber-400", "bg-amber-950/30"), 2200);
+        }
+        prevEvictions[node.name] = evictions;
     });
 }
 

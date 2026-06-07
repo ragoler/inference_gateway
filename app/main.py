@@ -2,6 +2,7 @@ import os
 import json
 import time
 import asyncio
+import threading
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -16,6 +17,15 @@ try:
     K8S_AVAILABLE = True
 except Exception:
     K8S_AVAILABLE = False
+
+# ZMQ + msgspec let the app consume vLLM's KV-cache events directly (the same
+# stream the llm-d EPP indexes), to show a real per-pod block index + evictions.
+try:
+    import zmq
+    import msgspec
+    KV_EVENTS_AVAILABLE = True
+except Exception:
+    KV_EVENTS_AVAILABLE = False
 
 app = FastAPI(title="Inference Gateway Client API")
 
@@ -66,6 +76,104 @@ def list_vllm_pods():
         if pod.status.phase == "Running" and pod.status.pod_ip:
             result.append((pod.metadata.name, pod.status.pod_ip))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Live KV-cache index (consumes vLLM KV-cache events over ZMQ)
+#
+# vLLM publishes BlockStored / BlockRemoved / AllBlocksCleared events per pod on
+# tcp://<pod-ip>:5557, msgpack-encoded as [timestamp, [[tag, [block_hashes], ...]]].
+# We subscribe to each pod and track the set of resident block hashes, so the UI
+# can show a real per-pod block count and real evictions -- the same ground truth
+# the llm-d EPP routes on. (Best-effort: if events are missed the counts drift
+# until the next AllBlocksCleared; fine for a demo.)
+# ---------------------------------------------------------------------------
+KV_EVENTS_PORT = int(os.getenv("KV_EVENTS_PORT", "5557"))
+_kv_lock = threading.Lock()
+_kv_index = {}          # pod_ip -> {"name", "blocks": set, "evictions": int, "events": int}
+_kv_subscribed = set()  # pod_ips with a running subscriber thread
+
+
+def _kv_subscriber(pod_name: str, pod_ip: str):
+    """Subscribe to one vLLM pod's KV-event socket and maintain its block set."""
+    ctx = zmq.Context.instance()
+    sock = ctx.socket(zmq.SUB)
+    sock.setsockopt(zmq.SUBSCRIBE, b"")
+    sock.setsockopt(zmq.RCVTIMEO, 5000)
+    sock.connect(f"tcp://{pod_ip}:{KV_EVENTS_PORT}")
+    with _kv_lock:
+        _kv_index.setdefault(pod_ip, {"name": pod_name, "blocks": set(), "evictions": 0, "events": 0})
+    misses = 0
+    while True:
+        try:
+            frames = sock.recv_multipart()
+        except zmq.Again:
+            misses += 1
+            if misses > 6:        # pod likely gone; let discovery re-add if it returns
+                break
+            continue
+        except Exception:
+            break
+        misses = 0
+        try:
+            batch = msgspec.msgpack.decode(frames[-1])
+            events = batch[1] if isinstance(batch, list) and len(batch) > 1 else []
+        except Exception:
+            continue
+        with _kv_lock:
+            st = _kv_index.setdefault(pod_ip, {"name": pod_name, "blocks": set(), "evictions": 0, "events": 0})
+            for ev in events:
+                if not ev:
+                    continue
+                tag = ev[0]
+                st["events"] += 1
+                if tag == "BlockStored" and len(ev) > 1 and ev[1]:
+                    st["blocks"].update(ev[1])
+                elif tag == "BlockRemoved" and len(ev) > 1 and ev[1]:
+                    for h in ev[1]:
+                        st["blocks"].discard(h)
+                    st["evictions"] += len(ev[1])
+                elif tag == "AllBlocksCleared":
+                    st["evictions"] += len(st["blocks"])
+                    st["blocks"].clear()
+    try:
+        sock.close(0)
+    except Exception:
+        pass
+    with _kv_lock:
+        _kv_subscribed.discard(pod_ip)
+
+
+def _kv_discovery_loop():
+    """Ensure one subscriber thread per running vLLM pod."""
+    while True:
+        try:
+            for name, ip in list_vllm_pods():
+                start = False
+                with _kv_lock:
+                    if ip not in _kv_subscribed:
+                        _kv_subscribed.add(ip)
+                        start = True
+                if start:
+                    threading.Thread(target=_kv_subscriber, args=(name, ip), daemon=True).start()
+        except Exception:
+            pass
+        time.sleep(10)
+
+
+def kv_index_snapshot():
+    """pod_name -> {blocks_cached, evictions} from the live KV index."""
+    out = {}
+    with _kv_lock:
+        for st in _kv_index.values():
+            out[st["name"]] = {"blocks_cached": len(st["blocks"]), "evictions": st["evictions"]}
+    return out
+
+
+@app.on_event("startup")
+async def _start_kv_consumer():
+    if K8S_AVAILABLE and KV_EVENTS_AVAILABLE:
+        threading.Thread(target=_kv_discovery_loop, daemon=True).start()
 
 
 async def scrape_pod(http_client: httpx.AsyncClient, pod_ip: str) -> dict:
@@ -259,18 +367,21 @@ async def get_telemetry():
         return {
             "nodes": [
                 {"name": "vllm-cpu-server-local-1", "kv_cache_usage": 0.0, "queue_length": 0,
-                 "running": 1, "hit_ratio": 0.0, "cached_tokens": 0},
+                 "running": 1, "hit_ratio": 0.0, "cached_tokens": 0, "blocks_cached": 0, "evictions": 0},
                 {"name": "vllm-cpu-server-local-2", "kv_cache_usage": 0.0, "queue_length": 1,
-                 "running": 0, "hit_ratio": 0.0, "cached_tokens": 0},
-            ]
+                 "running": 0, "hit_ratio": 0.0, "cached_tokens": 0, "blocks_cached": 0, "evictions": 0},
+            ],
+            "kv_events": False,
         }
 
     try:
         nodes = []
+        kv = kv_index_snapshot()  # llm-d-style block index from live KV events
         async with httpx.AsyncClient() as http_client:
             for name, ip in list_vllm_pods():
                 m = await scrape_pod(http_client, ip)
                 hit_ratio = (m["prefix_hits"] / m["prefix_queries"]) if m["prefix_queries"] > 0 else 0.0
+                k = kv.get(name, {})
                 nodes.append({
                     "name": name,
                     "kv_cache_usage": m["kv_cache_usage"],
@@ -282,8 +393,13 @@ async def get_telemetry():
                     # session-relative hit rate (resets on "New Run").
                     "prefix_queries": int(m["prefix_queries"]),
                     "prefix_hits": int(m["prefix_hits"]),
+                    # Ground-truth KV block index from vLLM events (llm-d signal).
+                    "blocks_cached": k.get("blocks_cached", 0),
+                    "evictions": k.get("evictions", 0),
                 })
-        return {"nodes": nodes}
+        return {"nodes": nodes, "kv_events": KV_EVENTS_AVAILABLE}
+    except Exception as e:
+        return {"error": str(e), "nodes": []}
     except Exception as e:
         return {"error": str(e), "nodes": []}
 

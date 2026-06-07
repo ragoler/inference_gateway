@@ -86,6 +86,11 @@ signals scraped from the vLLM pods — no faked numbers.
   (`routing.cache_hit`, `routing.hit_ratio`).
 - **Time-to-First-Token** — measured from the streamed first token (`/generate` proxies
   with `stream: true` and timestamps the first chunk).
+- **KV blocks held per pod + evictions (llm-d ground truth)** — the app subscribes to each
+  vLLM pod's KV-cache event stream over ZMQ (the same `BlockStored`/`BlockRemoved` events the
+  llm-d EPP indexes) and shows the real resident-block count per pod and flashes a real LRU
+  **eviction** when blocks are removed (the saturation/thrashing signal). Requires
+  `pyzmq`/`msgspec` (in `requirements.txt`); degrades gracefully if unavailable.
 
 **How the routing works (llm-d precise prefix-cache routing):** the active Endpoint Picker
 is the **llm-d endpoint-picker** (`infra/llm-d-epp.yaml`). vLLM publishes **KV-cache events**
