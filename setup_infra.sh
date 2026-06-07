@@ -173,7 +173,7 @@ kubectl rollout status deployment/${INFERENCE_POOL_NAME}-epp --timeout=120s
 
 echo "=== Step 8: Deploying llm-d precise prefix-cache routing EPP ==="
 # Event-driven precise prefix-cache routing: this EPP consumes vLLM's KV-cache
-# events over ZMQ (enabled in infra/cpu-deployment.yaml) and routes each request
+# events over ZMQ (enabled in the model-server deployment) and routes each request
 # to the pod that physically holds the most of its prefix. It becomes the active
 # Endpoint Picker; flip endpointPickerRef back to ${INFERENCE_POOL_NAME}-epp to roll back.
 export MODEL_NAME BLOCK_SIZE

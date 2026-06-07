@@ -12,6 +12,13 @@ REGION="${REGION:-${ZONE%-*}}"
 REPO_NAME="inference-gateway-client"
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 
+# Point kubectl at the cluster named in .env so we never deploy to the wrong
+# cluster (e.g. an existing demo cluster) based on the ambient context.
+echo "=== Targeting cluster ${CLUSTER_NAME} (${ZONE}) ==="
+gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}"
+
+# The app image is backend-agnostic (one build for both clusters); the CPU/GPU
+# difference is the BACKEND env injected into the Deployment below.
 echo "=== Creating Artifact Registry Repository ==="
 gcloud artifacts repositories create "$REPO_NAME" \
     --repository-format=docker \
