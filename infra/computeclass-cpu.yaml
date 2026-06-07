@@ -1,0 +1,26 @@
+# CPU Custom Compute Class: spot-preferred with family fallback.
+# Model-server pods select this via nodeSelector cloud.google.com/compute-class: cpu-flex.
+# Requires Node Auto-Provisioning enabled on the cluster.
+#
+# NOTE: confirm the exact GKE machine family names. "e2" is valid/available today;
+# "e4" should be verified (GCP general-purpose families include e2, n4, c4 — replace
+# "e4" with the intended newer family if needed). e2 is listed first so the CPU stack
+# provisions even before "e4" is confirmed.
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: cpu-flex
+spec:
+  priorities:
+    - machineFamily: e2
+      spot: true
+    - machineFamily: e2
+      spot: false
+    - machineFamily: e4
+      spot: true
+    - machineFamily: e4
+      spot: false
+  nodePoolAutoCreation:
+    enabled: true
+  activeMigration:
+    optimizeRulePriority: true

@@ -24,3 +24,6 @@ spec:
           value: "${GATEWAY_IP}"
         - name: MODEL_NAME
           value: "${MODEL_NAME}"
+        # Which hardware this cluster serves (shown in the UI). From .env.
+        - name: BACKEND
+          value: "${BACKEND}"

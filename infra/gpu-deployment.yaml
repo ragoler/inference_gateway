@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: vllm-server
 spec:
+  # If only one GPU schedules under capacity pressure, the app still reports Ready
+  # (readyReplicas >= 1); the second pod stays Pending and shows as provisioning.
   replicas: 2
   selector:
     matchLabels:
@@ -13,18 +15,22 @@ spec:
         app: vllm-server
         inference.networking.k8s.io/engine-type: vllm
     spec:
-      # Model servers run on the ComputeClass (spot-preferred) pool; the gateway,
-      # EPP and app stay on the on-demand default pool. See infra/computeclass-cpu.yaml.
+      # GPU model servers run on the gpu-flex ComputeClass (G4 spot -> G4 on-demand
+      # -> G2 spot -> G2 on-demand). See infra/computeclass-gpu.yaml.
       nodeSelector:
-        cloud.google.com/compute-class: cpu-flex
+        cloud.google.com/compute-class: gpu-flex
+        cloud.google.com/gke-gpu-driver-version: default
       tolerations:
       - key: cloud.google.com/gke-spot
         operator: Equal
         value: "true"
         effect: NoSchedule
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
       containers:
       - name: vllm
-        image: "vllm/vllm-openai-cpu:latest"
+        image: "vllm/vllm-openai:latest"
         imagePullPolicy: Always
         command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
         args:
@@ -37,15 +43,14 @@ spec:
         # Block size must match the EPP's tokenProcessorConfig.blockSize (BLOCK_SIZE).
         - "--block-size"
         - "${BLOCK_SIZE}"
+        - "--gpu-memory-utilization"
+        - "0.90"
         # Publish KV-cache events over ZMQ for the llm-d precise prefix-cache indexer.
         - "--kv-events-config"
         - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","topic":"kv@$(POD_IP):5557@${MODEL_NAME}"}'
         env:
         - name: PORT
           value: "8000"
-        # Cap the CPU KV Cache to avoid OOMKilled errors
-        - name: VLLM_CPU_KVCACHE_SPACE
-          value: "${KV_CACHE_SPACE}"
         - name: POD_IP
           valueFrom:
             fieldRef:
@@ -79,11 +84,11 @@ spec:
           timeoutSeconds: 1
         resources:
           limits:
-            cpu: "4"
-            memory: "20Gi"
-            ephemeral-storage: "10Gi"
+            nvidia.com/gpu: "1"
           requests:
-            cpu: "4"
+            cpu: "2"
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
         volumeMounts:
         - mountPath: /dev/shm
           name: shm

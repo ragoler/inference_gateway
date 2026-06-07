@@ -43,3 +43,80 @@ Create a highly intuitive, interactive user interface that allows presenters or 
 ### Phase 4: The Thrashing Proof
 1.  **Cache Miss Proof**: The presenter asks a question about the evicted **Context Alpha**.
 2.  **The Payoff**: The UI traces it to Node 1, but the graph registers a **Cache Miss**. TTFT spikes back to **~4.5 seconds**, proving physically that the eviction occurred and context had to be recomputed.
+
+---
+
+# Backend Architecture: Selectable CPU / GPU via Two Clusters
+
+This section captures the deployment design for running the same demo on either a
+**CPU** or a **GPU** backend. (The numbers in the playbook above are CPU-era; on GPU,
+cold prefill drops to ~1s and warm hits to sub-second.)
+
+## Principles
+1. **Two separate clusters**, one per backend (`BACKEND=cpu|gpu`), each with its own
+   gateway IP and app URL. There is **no single UI that chooses CPU vs GPU**.
+2. The two stacks are **as identical as possible** — everything except the model-server
+   deployment, the ComputeClass, and the KV block size is byte-for-byte the same.
+3. **The UI states which backend it is** (CPU or GPU) prominently.
+4. **Provisioning awareness**: if the model-server VM isn't provisioned yet, the UI shows
+   a "provisioning…" state and keeps polling until it's Ready.
+5. **Spot resilience**: if a spot VM is reclaimed (GPU or CPU), the UI shows it is
+   re-provisioning and recovers automatically when capacity returns.
+
+## What is identical across both clusters
+Gateway, Inference-Extension CRDs, InferencePool, vanilla EPP, **llm-d precise EPP**,
+HTTPRoute, InferenceObjectives, and the **app image** (same build). They select model
+pods by a stable, hardware-neutral label (`app: vllm-server`) and proxy OpenAI calls —
+they do not know or care about the hardware.
+
+## What is parameterized by `BACKEND`
+| Item | CPU | GPU |
+|---|---|---|
+| Model-server manifest | `infra/cpu-deployment.yaml` | `infra/gpu-deployment.yaml` |
+| Image | `vllm/vllm-openai-cpu` | `vllm/vllm-openai` (`nvidia.com/gpu: 1`) |
+| ComputeClass | `cpu-flex` | `gpu-flex` |
+| `BLOCK_SIZE` (must match vLLM ↔ EPP `tokenProcessorConfig.blockSize`) | 128 | 16 |
+| Cluster name | e.g. `cpu-flex-cluster` | e.g. `gpu-flex-cluster` |
+
+Same model on both: **Qwen/Qwen2.5-1.5B-Instruct**.
+
+## Compute: symmetric Custom Compute Classes (spot → on-demand, with family fallback)
+Both clusters enable **Node Auto-Provisioning**; a `ComputeClass` defines a prioritized,
+auto-provisioned node list. Model servers run on the ComputeClass (spot-preferred) pool;
+the gateway/EPP/**app** run on a small **on-demand default pool** so the app stays up to
+*report* provisioning even while the model node is being created or replaced.
+
+```
+gpu-flex:  G4 spot → G4 on-demand → G2 spot → G2 on-demand
+cpu-flex:  e4 spot → e4 on-demand → e2 spot → e2 on-demand
+both:      nodePoolAutoCreation: enabled ; activeMigration (return to higher tier when freed)
+```
+*(G2 = NVIDIA L4; "G4" is the newer small-GPU family — confirm exact GKE machine type at
+build. "e4" family name to confirm; e2 is the current proven family. Order prefers the
+newer/preferred family, falling back to the more-available one — mirrored across CPU & GPU.)*
+
+If every tier is unavailable, model pods stay `Pending` (we **wait for capacity** — no
+auto cross-backend fallback) and the UI shows "provisioning".
+
+## UI: backend identity + provisioning state machine
+The app reads `BACKEND` from env and exposes a `/api/status` endpoint computed from the
+Kubernetes API (model Deployment `readyReplicas` + pod/node/events):
+
+| Condition | `state` | UI |
+|---|---|---|
+| `readyReplicas ≥ 1` | `ready` | normal UI; backend badge "Backend: GPU / CPU" |
+| desired ≥1, never-been-ready, pods `Pending`/`Unschedulable` | `provisioning` | banner "Provisioning {GPU/CPU} compute…"; Send disabled; keep polling |
+| was ready, now `readyReplicas == 0` (spot reclaim) | `reprovisioning` | banner "Compute reclaimed (spot) — re-provisioning…"; keep polling |
+| pods crash/image error | `degraded` | distinct error banner |
+
+The UI polls `/api/status`, gates the controls on `state`, and **auto-recovers** to Ready.
+"provisioning" deliberately covers every not-ready cause (node create → boot → driver →
+image pull → model load).
+
+## Operational model (matches "swap rarely; redeploy is fine")
+- CPU cluster = always-available default; GPU cluster spun up on demand and torn down
+  (`setup_infra.sh --delete-cluster`) when idle to save cost.
+- Provision a backend: set `BACKEND` + `CLUSTER_NAME` in `.env`, then
+  `./setup_infra.sh && ./deploy_app.sh` (run where helm + Docker are available).
+- **Use a distinct `CLUSTER_NAME`** for these new clusters so the existing demo cluster is
+  never touched.

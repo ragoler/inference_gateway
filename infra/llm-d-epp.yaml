@@ -9,8 +9,8 @@
 # InferencePool's endpointPickerRef to this Service (rollback = flip back).
 #
 #   kubectl apply -f infra/llm-d-epp.yaml
-#   kubectl patch inferencepool vllm-cpu-server --type merge \
-#     -p '{"spec":{"endpointPickerRef":{"name":"vllm-cpu-server-epp-llmd"}}}'
+#   kubectl patch inferencepool vllm-server --type merge \
+#     -p '{"spec":{"endpointPickerRef":{"name":"vllm-server-epp-llmd"}}}'
 ---
 # ClusterIP for the model server, used by the EPP's token-producer to tokenize
 # prompts via vLLM's /v1/completions/render (so block hashes match vLLM's).
@@ -21,7 +21,7 @@ metadata:
   namespace: default
 spec:
   selector:
-    app: vllm-cpu-server
+    app: vllm-server
   ports:
   - name: http
     port: 8000
@@ -47,7 +47,7 @@ data:
       - type: precise-prefix-cache-producer
         parameters:
           tokenProcessorConfig:
-            blockSize: 128          # must match vLLM's resolved block_size
+            blockSize: ${BLOCK_SIZE}   # must match vLLM --block-size (CPU 128, GPU 16)
           speculativeIndexing: true
           indexerConfig:
             kvBlockIndexConfig:
@@ -88,24 +88,24 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-cpu-server-epp-llmd
+  name: vllm-server-epp-llmd
   namespace: default
   labels:
-    app: vllm-cpu-server-epp-llmd
+    app: vllm-server-epp-llmd
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: vllm-cpu-server-epp-llmd
+      app: vllm-server-epp-llmd
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: vllm-cpu-server-epp-llmd
+        app: vllm-server-epp-llmd
     spec:
       # Reuse the vanilla EPP's ServiceAccount (already has pods + inferencepools RBAC).
-      serviceAccountName: vllm-cpu-server-epp
+      serviceAccountName: vllm-server-epp
       containers:
       - name: epp
         # Pinned to an immutable digest for reproducibility/stability (was :main,
@@ -114,7 +114,7 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - --pool-name
-        - vllm-cpu-server
+        - vllm-server
         - --pool-namespace
         - default
         - --pool-group
@@ -170,11 +170,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-cpu-server-epp-llmd
+  name: vllm-server-epp-llmd
   namespace: default
 spec:
   selector:
-    app: vllm-cpu-server-epp-llmd
+    app: vllm-server-epp-llmd
   ports:
   - name: grpc-ext-proc
     port: 9002

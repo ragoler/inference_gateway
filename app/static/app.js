@@ -36,6 +36,7 @@ let sessionNonce = "";      // prepended to contexts; bumping it makes caches co
 let sessionBaseline = {};   // {pod: {queries, hits}} captured at New Run for session hit-rate
 let latestNodes = [];       // last telemetry snapshot
 let prevEvictions = {};     // pod -> last eviction count, to detect new evictions
+let backendReady = true;    // gated by /api/status; false while compute is provisioning
 
 document.addEventListener("DOMContentLoaded", () => {
     setupDropZone();
@@ -43,9 +44,46 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("session-tag").innerText = `session: ${sessionNonce} (caches cold)`;
     pollTelemetry();
     setInterval(pollTelemetry, 2500);
+    pollStatus();
+    setInterval(pollStatus, 2500);
     renderTtftGraph();
     updateCtxTokens();
 });
+
+// Backend identity + provisioning state (CPU/GPU, and whether the model server is up).
+async function pollStatus() {
+    try {
+        const d = await (await fetch("/api/status")).json();
+        const hw = d.hardware || (d.backend === "gpu" ? "GPU" : "CPU");
+
+        const badge = document.getElementById("backend-badge");
+        badge.innerText = `Backend: ${hw}`;
+        badge.className = "text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full border " +
+            (d.backend === "gpu" ? "border-fuchsia-500/60 bg-fuchsia-500/10 text-fuchsia-300"
+                                 : "border-sky-500/60 bg-sky-500/10 text-sky-300");
+
+        const banner = document.getElementById("provision-banner");
+        const msg = document.getElementById("provision-message");
+        const btn = document.getElementById("submit-btn");
+        backendReady = (d.state === "ready");
+
+        if (backendReady) {
+            banner.classList.add("hidden");
+        } else {
+            msg.innerText = d.message || "Provisioning…";
+            banner.className = "border-b px-6 py-3 flex items-center space-x-3 " +
+                (d.state === "degraded" ? "bg-red-500/15 border-red-500/40 text-red-300"
+                                        : "bg-amber-500/15 border-amber-500/40 text-amber-300");
+        }
+        if (btn) {
+            btn.disabled = !backendReady;
+            btn.classList.toggle("opacity-50", !backendReady);
+            btn.classList.toggle("cursor-not-allowed", !backendReady);
+        }
+    } catch (err) {
+        console.error("Failed to poll status", err);
+    }
+}
 
 function makeNonce() {
     return Math.random().toString(36).slice(2, 7);
@@ -263,6 +301,7 @@ async function executeRequest() {
     const question = document.getElementById("prompt-input").value.trim();
     const context = document.getElementById("context-input").value.trim();
     if (!question) { alert("Please enter a question."); return; }
+    if (!backendReady) { logEvent("Backend is still provisioning — please wait until it is Ready.", true); return; }
 
     // Build the actual prompt: context becomes the shared PREFIX.
     let prompt = question;

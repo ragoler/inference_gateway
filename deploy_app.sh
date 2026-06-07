@@ -47,6 +47,7 @@ echo "=== Deploying Application Manifests ==="
 export REGISTRY="${REGISTRY}"
 export GATEWAY_IP="${GATEWAY_IP}"
 export MODEL_NAME="${MODEL_NAME}"
+export BACKEND="${BACKEND:-cpu}"   # shown in the UI; one backend per cluster
 
 kubectl apply -f k8s/rbac.yaml
 # Portable variable substitution (envsubst is not installed by default on macOS).

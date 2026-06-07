@@ -39,6 +39,20 @@ case "${1:-}" in
   *) echo "Unknown argument: $1 (use --delete, --delete-cluster, or no flag)"; exit 1 ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Backend selection: BACKEND=cpu|gpu (from .env) picks the model-server manifest,
+# the Custom Compute Class, and the KV block size (which MUST match between the
+# vLLM --block-size and the EPP tokenProcessorConfig.blockSize).
+# ---------------------------------------------------------------------------
+BACKEND="${BACKEND:-cpu}"
+case "$BACKEND" in
+  cpu) MODEL_DEPLOYMENT="infra/cpu-deployment.yaml"; COMPUTE_CLASS_FILE="infra/computeclass-cpu.yaml"; BLOCK_SIZE="${BLOCK_SIZE:-128}" ;;
+  gpu) MODEL_DEPLOYMENT="infra/gpu-deployment.yaml"; COMPUTE_CLASS_FILE="infra/computeclass-gpu.yaml"; BLOCK_SIZE="${BLOCK_SIZE:-16}" ;;
+  *) echo "BACKEND must be 'cpu' or 'gpu' (got: $BACKEND)"; exit 1 ;;
+esac
+export BACKEND BLOCK_SIZE
+echo "Backend: ${BACKEND}  (deployment=${MODEL_DEPLOYMENT}, compute-class=${COMPUTE_CLASS_FILE}, block_size=${BLOCK_SIZE})"
+
 # Check and install helm locally if needed (OS/arch-aware download).
 if ! command -v helm &> /dev/null; then
   echo "helm not found. Installing locally to ./bin..."
@@ -55,14 +69,15 @@ teardown_resources() {
     echo "Cluster ${CLUSTER_NAME} does not exist; nothing to tear down."
     return 0
   fi
-  echo "=== Tearing down in-cluster resources ==="
+  echo "=== Tearing down in-cluster resources (backend=${BACKEND}) ==="
   gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}"
-  export MODEL_NAME GATEWAY_NAME KV_CACHE_SPACE INFERENCE_POOL_NAME=vllm-cpu-server
+  export MODEL_NAME GATEWAY_NAME KV_CACHE_SPACE BLOCK_SIZE INFERENCE_POOL_NAME=vllm-server
   kubectl delete -f infra/inference-objective.yaml --ignore-not-found || true
   render infra/llm-d-epp.yaml | kubectl delete -f - --ignore-not-found || true
   helm uninstall "${INFERENCE_POOL_NAME}" || true
-  render infra/cpu-deployment.yaml | kubectl delete -f - --ignore-not-found || true
+  render "${MODEL_DEPLOYMENT}" | kubectl delete -f - --ignore-not-found || true
   render infra/gateway.yaml | kubectl delete -f - --ignore-not-found || true
+  kubectl delete -f "${COMPUTE_CLASS_FILE}" --ignore-not-found || true
   echo "Resource teardown complete."
 }
 
@@ -78,6 +93,14 @@ if [ "$MODE" = "delete" ] || [ "$MODE" = "delete-cluster" ]; then
 fi
 
 echo "=== Step 1: Creating GKE Cluster ==="
+# Node Auto-Provisioning lets the Custom Compute Class create node pools on demand
+# (spot->on-demand, family fallback). The small default node pool (NUM_NODES) hosts
+# the gateway controller, EPP, and the app; model servers land on ComputeClass nodes.
+NAP_FLAGS="--enable-autoprovisioning --min-cpu 0 --max-cpu ${MAX_CPU:-200} --min-memory 0 --max-memory ${MAX_MEMORY:-2000}"
+if [ "$BACKEND" = "gpu" ]; then
+  # Confirm accelerator type(s) for your G4/G2 selection (nvidia-l4 = G2/L4).
+  NAP_FLAGS="${NAP_FLAGS} --max-accelerator type=${GPU_ACCELERATOR_TYPE:-nvidia-l4},count=${MAX_GPU:-8}"
+fi
 if gcloud container clusters describe "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
   echo "Cluster ${CLUSTER_NAME} already exists. Skipping creation."
 else
@@ -86,7 +109,8 @@ else
     --zone="${ZONE}" \
     --machine-type="${MACHINE_TYPE}" \
     --num-nodes="${NUM_NODES}" \
-    --gateway-api=standard
+    --gateway-api=standard \
+    ${NAP_FLAGS}
 fi
 
 echo "=== Step 2: Getting Cluster Credentials ==="
@@ -113,13 +137,16 @@ echo "=== Step 4: Deploying GKE Inference Gateway ==="
 export GATEWAY_NAME="${GATEWAY_NAME}"
 render infra/gateway.yaml | kubectl apply -f -
 
-echo "=== Step 5: Deploying CPU-Based vLLM Model Server ==="
+echo "=== Step 4b: Applying ${BACKEND} Custom Compute Class (spot -> on-demand, family fallback) ==="
+kubectl apply -f "${COMPUTE_CLASS_FILE}"
+
+echo "=== Step 5: Deploying ${BACKEND}-based vLLM Model Server ==="
 export MODEL_NAME="${MODEL_NAME}"
 export KV_CACHE_SPACE="${KV_CACHE_SPACE}"
-render infra/cpu-deployment.yaml | kubectl apply -f -
+render "${MODEL_DEPLOYMENT}" | kubectl apply -f -
 
 echo "=== Step 6: Deploying InferencePool and EPP using Helm ==="
-export INFERENCE_POOL_NAME=vllm-cpu-server
+export INFERENCE_POOL_NAME=vllm-server
 export GATEWAY_PROVIDER=gke
 export MODEL_SERVER=vllm
 export MODEL_SERVER_PROTOCOL=http
@@ -147,11 +174,11 @@ echo "=== Step 8: Deploying llm-d precise prefix-cache routing EPP ==="
 # events over ZMQ (enabled in infra/cpu-deployment.yaml) and routes each request
 # to the pod that physically holds the most of its prefix. It becomes the active
 # Endpoint Picker; flip endpointPickerRef back to ${INFERENCE_POOL_NAME}-epp to roll back.
-export MODEL_NAME
+export MODEL_NAME BLOCK_SIZE
 render infra/llm-d-epp.yaml | kubectl apply -f -
-kubectl rollout status deployment/vllm-cpu-server-epp-llmd --timeout=180s
+kubectl rollout status deployment/vllm-server-epp-llmd --timeout=180s
 kubectl patch inferencepool ${INFERENCE_POOL_NAME} --type merge \
-  -p '{"spec":{"endpointPickerRef":{"name":"vllm-cpu-server-epp-llmd"}}}'
+  -p '{"spec":{"endpointPickerRef":{"name":"vllm-server-epp-llmd"}}}'
 
 echo "=== Step 9: Declaring InferenceObjectives (request priority / criticality) ==="
 kubectl apply -f infra/inference-objective.yaml

@@ -28,7 +28,10 @@ The system architecture is divided into three primary layers:
 │   ├── main.py              # FastAPI server handling prompt formatting & routing
 │   └── requirements.txt     # Python runtime dependencies
 ├── infra/
-│   ├── cpu-deployment.yaml  # vLLM model server (+ KV-cache event publishing over ZMQ)
+│   ├── cpu-deployment.yaml  # CPU vLLM model server (ComputeClass + KV events over ZMQ)
+│   ├── gpu-deployment.yaml  # GPU vLLM model server (nvidia.com/gpu, gpu-flex ComputeClass)
+│   ├── computeclass-cpu.yaml # CPU Custom Compute Class (e2/e4 spot -> on-demand)
+│   ├── computeclass-gpu.yaml # GPU Custom Compute Class (G4 -> G2, spot -> on-demand)
 │   ├── epp-config.yaml      # Vanilla EPP scorer weights (kept as rollback target)
 │   ├── llm-d-epp.yaml       # llm-d precise prefix-cache routing EPP (active; image pinned by digest)
 │   ├── inference-objective.yaml # Request priority/criticality (InferenceObjective)
@@ -70,6 +73,27 @@ creates a proxy-only subnet if one is missing). Teardown flags for a clean rebui
 The shared proxy-only subnet is never deleted. A full reproducible cycle is
 `--delete-cluster` → `./setup_infra.sh` → `./deploy_app.sh` (the app image build
 needs Docker, so run `deploy_app.sh` where Docker is available).
+
+### Selectable CPU / GPU backend (two clusters)
+One backend per cluster, chosen by **`BACKEND=cpu|gpu`** in `.env`. The two stacks are
+identical except the model-server deployment, the Custom Compute Class, and the KV
+`BLOCK_SIZE` (CPU 128 / GPU 16). Both clusters use a ComputeClass with **spot → on-demand**
+fallback (GPU also **G4 → G2**); model servers run on the ComputeClass (spot) pool while the
+gateway/EPP/app stay on the on-demand default pool. Use a **distinct `CLUSTER_NAME` per
+backend** so existing clusters are never touched:
+
+```bash
+# GPU cluster
+BACKEND=gpu CLUSTER_NAME=gpu-flex-cluster ./setup_infra.sh && ./deploy_app.sh
+# CPU cluster
+BACKEND=cpu CLUSTER_NAME=cpu-flex-cluster ./setup_infra.sh && ./deploy_app.sh
+```
+
+The **UI shows which backend it is** (badge) and is **provisioning-aware**: while the
+model VM isn't up (cold provisioning, or a spot node reclaimed), it shows a "provisioning /
+re-provisioning…" banner via `/api/status` and keeps polling until Ready (Send is disabled
+meanwhile). If GPU capacity is unavailable after all fallback tiers, pods stay `Pending` and
+the UI simply keeps showing "provisioning".
 
 ### 3. Build and Deploy the FastAPI Microservice
 Once the cluster and gateway are healthy, deploy the backend application:

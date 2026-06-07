@@ -1,0 +1,26 @@
+# GPU Custom Compute Class: prefer the newer small GPU (G4) on spot, fall back to
+# on-demand, then to G2 (NVIDIA L4) spot, then G2 on-demand. Model-server pods select
+# this via nodeSelector cloud.google.com/compute-class: gpu-flex. Requires Node
+# Auto-Provisioning enabled on the cluster.
+#
+# NOTE: confirm the exact GKE GPU machine types. G2 = NVIDIA L4 (g2-standard-*). "G4" is
+# the newer small-GPU family — verify its machine family/type and per-node GPU count, and
+# switch machineFamily -> machineType (e.g., g2-standard-8) if NAP needs the explicit type.
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: gpu-flex
+spec:
+  priorities:
+    - machineFamily: g4
+      spot: true
+    - machineFamily: g4
+      spot: false
+    - machineFamily: g2
+      spot: true
+    - machineFamily: g2
+      spot: false
+  nodePoolAutoCreation:
+    enabled: true
+  activeMigration:
+    optimizeRulePriority: true

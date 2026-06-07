@@ -14,6 +14,7 @@ try:
     from kubernetes import client, config
     config.load_incluster_config()
     v1 = client.CoreV1Api()
+    apps_v1 = client.AppsV1Api()
     K8S_AVAILABLE = True
 except Exception:
     K8S_AVAILABLE = False
@@ -32,8 +33,14 @@ app = FastAPI(title="Inference Gateway Client API")
 GATEWAY_IP = os.getenv("GATEWAY_IP")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct")
 NAMESPACE = os.getenv("POD_NAMESPACE", "default")
-POD_SELECTOR = os.getenv("POD_SELECTOR", "app=vllm-cpu-server")
+POD_SELECTOR = os.getenv("POD_SELECTOR", "app=vllm-server")
 METRICS_PORT = os.getenv("METRICS_PORT", "8000")
+# Which hardware this cluster serves (shown in the UI). One backend per cluster.
+BACKEND = os.getenv("BACKEND", "cpu")
+MODEL_DEPLOYMENT_NAME = os.getenv("MODEL_DEPLOYMENT_NAME", "vllm-server")
+# Tracks whether the model server was ever Ready, to distinguish first-time
+# provisioning from re-provisioning after a spot reclaim.
+_was_ready = False
 
 # Number of /generate calls currently in their measured window. Used to flag
 # when per-pod metric-delta attribution is unreliable (overlapping requests).
@@ -370,7 +377,57 @@ async def generate_text(request: GenerateRequest):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "gateway_ip_configured": bool(GATEWAY_IP), "k8s_available": K8S_AVAILABLE}
+    return {"status": "ok", "backend": BACKEND,
+            "gateway_ip_configured": bool(GATEWAY_IP), "k8s_available": K8S_AVAILABLE}
+
+
+def _model_status():
+    """(ready_replicas, desired, degraded_reason) for the model-server Deployment."""
+    if not K8S_AVAILABLE:
+        return 2, 2, None  # local/dev: pretend Ready
+    ready = desired = 0
+    try:
+        dep = apps_v1.read_namespaced_deployment_status(MODEL_DEPLOYMENT_NAME, NAMESPACE)
+        desired = dep.spec.replicas or 0
+        ready = dep.status.ready_replicas or 0
+    except Exception:
+        pass
+    # Detect a hard failure (image/crash) vs. normal provisioning.
+    degraded = None
+    try:
+        pods = v1.list_namespaced_pod(namespace=NAMESPACE, label_selector=POD_SELECTOR)
+        for pod in pods.items:
+            for cs in (pod.status.container_statuses or []):
+                waiting = getattr(cs.state, "waiting", None)
+                if waiting and waiting.reason in ("CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull"):
+                    degraded = waiting.reason
+    except Exception:
+        pass
+    return ready, desired, degraded
+
+
+@app.get("/api/status")
+async def get_status():
+    """Backend identity + provisioning state, so the UI can show provisioning/
+    re-provisioning and keep polling until the model server is Ready."""
+    global _was_ready
+    ready, desired, degraded = _model_status()
+    hw = "GPU" if BACKEND == "gpu" else "CPU"
+
+    if degraded and ready == 0:
+        state, message = "degraded", f"Model server error: {degraded}."
+    elif ready >= 1:
+        _was_ready = True
+        state, message = "ready", f"Ready on {hw}."
+    elif _was_ready:
+        state = "reprovisioning"
+        message = f"{hw} compute was reclaimed (spot) — re-provisioning…"
+    else:
+        state = "provisioning"
+        message = f"Provisioning {hw} compute… (waiting for a node + model load)"
+
+    return {"backend": BACKEND, "hardware": hw, "state": state,
+            "ready_replicas": ready, "desired": desired, "message": message}
 
 
 @app.get("/api/telemetry")

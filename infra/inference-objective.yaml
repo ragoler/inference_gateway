@@ -11,7 +11,7 @@ spec:
   priority: 10
   poolRef:
     group: inference.networking.k8s.io
-    name: vllm-cpu-server
+    name: vllm-server
 ---
 apiVersion: inference.networking.x-k8s.io/v1alpha2
 kind: InferenceObjective
@@ -22,4 +22,4 @@ spec:
   priority: 0
   poolRef:
     group: inference.networking.k8s.io
-    name: vllm-cpu-server
+    name: vllm-server
