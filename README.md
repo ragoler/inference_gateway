@@ -28,8 +28,9 @@ The system architecture is divided into three primary layers:
 │   ├── main.py              # FastAPI server handling prompt formatting & routing
 │   └── requirements.txt     # Python runtime dependencies
 ├── infra/
-│   ├── cpu-deployment.yaml  # vLLM model server configuration & resources
-│   ├── epp-config.yaml      # EPP scorer weights (prefix-cache affinity tuning)
+│   ├── cpu-deployment.yaml  # vLLM model server (+ KV-cache event publishing over ZMQ)
+│   ├── epp-config.yaml      # Vanilla EPP scorer weights (kept as rollback target)
+│   ├── llm-d-epp.yaml       # llm-d precise prefix-cache routing EPP (active Endpoint Picker)
 │   └── gateway.yaml         # External L7 Gateway definition
 ├── k8s/
 │   ├── app-deployment.yaml  # FastAPI application Deployment manifest
@@ -86,15 +87,30 @@ signals scraped from the vLLM pods — no faked numbers.
 - **Time-to-First-Token** — measured from the streamed first token (`/generate` proxies
   with `stream: true` and timestamps the first chunk).
 
-**How the routing works:** the EPP runs a `prefix-cache-scorer` plus queue- and
-KV-utilization-scorers. The chart's default weights (prefix=3, queue=2, kv=2) make
-affinity only *probabilistic* — a follow-up can land on the cold pod. `infra/epp-config.yaml`
-raises **prefix-cache-scorer to weight 10**, which makes "route to the pod holding your KV
-prefix" reliable while still load-balancing brand-new contexts (they match neither pod, so
-queue/kv break the tie). `setup_infra.sh` applies it and restarts the EPP.
+**How the routing works (llm-d precise prefix-cache routing):** the active Endpoint Picker
+is the **llm-d endpoint-picker** (`infra/llm-d-epp.yaml`). vLLM publishes **KV-cache events**
+over ZMQ (`--kv-events-config`, port 5557 — see `infra/cpu-deployment.yaml`); the EPP's
+`precise-prefix-cache-producer` subscribes to every pod's socket and maintains a real,
+eviction-aware map of which prefix blocks live on which pod. Its `prefix-cache-scorer` then
+routes each request to the pod that *physically* holds the most of its prefix — ground truth,
+not a heuristic. A `token-producer` tokenizes prompts via vLLM's `/v1/completions/render`
+(through `vllm-model-svc`) so the EPP's block hashes match vLLM's.
 
 Result: sending the same long context twice routes the follow-up to the **same pod** and
-returns a real cache hit (measured ~10s cold → ~1.5s warm TTFT).
+returns a real cache hit (measured **~9.5s cold → ~0.6s warm TTFT**, affinity reliable).
+
+**Two EPPs, instant rollback.** `setup_infra.sh` installs the vanilla
+gateway-api-inference-extension EPP (Step 6) and tunes its weights (Step 7,
+`infra/epp-config.yaml`, `prefix-cache-scorer` weight 10) as a heuristic fallback, then
+deploys the llm-d EPP and **flips the InferencePool's `endpointPickerRef`** to it (Step 8).
+To roll back to the heuristic EPP:
+```bash
+kubectl patch inferencepool vllm-cpu-server --type merge \
+  -p '{"spec":{"endpointPickerRef":{"name":"vllm-cpu-server-epp"}}}'
+```
+
+> Note: this is the *precise prefix-cache routing* slice of llm-d, deployed as plain
+> manifests (no Helm). P/D disaggregation (GPU + RDMA/NIXL) is out of scope for this CPU demo.
 
 > ⚠️ **Prefix caching is block-aligned (block size = 128 tokens).** Prompts shorter than one
 > block cache nothing and show no affinity. The UI's preset contexts are intentionally long
