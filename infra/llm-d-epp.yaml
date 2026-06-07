@@ -72,14 +72,18 @@ data:
     schedulingProfiles:
       - name: default
         plugins:
-          - pluginRef: kv-cache-utilization-scorer
-            weight: 2.0
-          - pluginRef: queue-scorer
-            weight: 2.0
+          # Make precise prefix-cache routing dominant: a pod that physically holds
+          # the prefix (score ~1 * 15) wins over momentary load differences. New
+          # prefixes match neither pod (prefix score 0 on both), so the small load
+          # weights still spread them across pods.
           - pluginRef: prefix-cache-scorer
-            weight: 3.0
+            weight: 15.0
+          - pluginRef: kv-cache-utilization-scorer
+            weight: 1.0
+          - pluginRef: queue-scorer
+            weight: 1.0
           - pluginRef: no-hit-lru-scorer
-            weight: 2.0
+            weight: 1.0
 ---
 apiVersion: apps/v1
 kind: Deployment
