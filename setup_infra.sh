@@ -22,6 +22,23 @@ done
 # alone so Kubernetes downward-API refs like $(POD_IP) survive to runtime).
 render() { python3 -c "import os,sys;sys.stdout.write(os.path.expandvars(open(sys.argv[1]).read()))" "$1"; }
 
+# ---------------------------------------------------------------------------
+# Mode dispatch (parsed early so --help / bad args exit before any work).
+#   (no flag)         create everything
+#   --delete          tear down in-cluster resources (keep cluster, CRDs, subnet)
+#   --delete-cluster  tear down resources AND delete the GKE cluster
+# Run a delete mode, then a plain run, for a clean reproducible rebuild.
+# The shared proxy-only subnet is NEVER deleted (other clusters use it).
+# ---------------------------------------------------------------------------
+MODE="create"
+case "${1:-}" in
+  --delete)         MODE="delete" ;;
+  --delete-cluster) MODE="delete-cluster" ;;
+  -h|--help)        echo "Usage: $0 [--delete | --delete-cluster]"; exit 0 ;;
+  "")               MODE="create" ;;
+  *) echo "Unknown argument: $1 (use --delete, --delete-cluster, or no flag)"; exit 1 ;;
+esac
+
 # Check and install helm locally if needed (OS/arch-aware download).
 if ! command -v helm &> /dev/null; then
   echo "helm not found. Installing locally to ./bin..."
@@ -31,6 +48,33 @@ if ! command -v helm &> /dev/null; then
   curl -fsSL "https://get.helm.sh/helm-v3.15.1-${HELM_OS}-${HELM_ARCH}.tar.gz" \
     | tar -xz -C bin --strip-components=1 "${HELM_OS}-${HELM_ARCH}/helm"
   export PATH="$PWD/bin:$PATH"
+fi
+
+teardown_resources() {
+  if ! gcloud container clusters describe "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
+    echo "Cluster ${CLUSTER_NAME} does not exist; nothing to tear down."
+    return 0
+  fi
+  echo "=== Tearing down in-cluster resources ==="
+  gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}"
+  export MODEL_NAME GATEWAY_NAME KV_CACHE_SPACE INFERENCE_POOL_NAME=vllm-cpu-server
+  kubectl delete -f infra/inference-objective.yaml --ignore-not-found || true
+  render infra/llm-d-epp.yaml | kubectl delete -f - --ignore-not-found || true
+  helm uninstall "${INFERENCE_POOL_NAME}" || true
+  render infra/cpu-deployment.yaml | kubectl delete -f - --ignore-not-found || true
+  render infra/gateway.yaml | kubectl delete -f - --ignore-not-found || true
+  echo "Resource teardown complete."
+}
+
+if [ "$MODE" = "delete" ] || [ "$MODE" = "delete-cluster" ]; then
+  teardown_resources
+  if [ "$MODE" = "delete-cluster" ]; then
+    echo "=== Deleting GKE cluster ${CLUSTER_NAME} (this takes several minutes) ==="
+    gcloud container clusters delete "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}" --quiet || true
+    echo "Note: the shared proxy-only subnet is left intact (other clusters use it)."
+  fi
+  echo "=== Teardown complete ==="
+  exit 0
 fi
 
 echo "=== Step 1: Creating GKE Cluster ==="

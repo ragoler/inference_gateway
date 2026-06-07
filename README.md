@@ -60,6 +60,17 @@ Execute the infrastructure setup script to provision your GKE cluster, enable Ga
 ./setup_infra.sh
 ```
 
+The script is idempotent and portable (macOS/Linux; uses `python3` for manifest
+substitution, downloads a matching `helm` if absent, pins the GAIE CRDs, and
+creates a proxy-only subnet if one is missing). Teardown flags for a clean rebuild:
+```bash
+./setup_infra.sh --delete          # remove in-cluster resources (keep cluster, CRDs, subnet)
+./setup_infra.sh --delete-cluster  # the above, plus delete the GKE cluster
+```
+The shared proxy-only subnet is never deleted. A full reproducible cycle is
+`--delete-cluster` → `./setup_infra.sh` → `./deploy_app.sh` (the app image build
+needs Docker, so run `deploy_app.sh` where Docker is available).
+
 ### 3. Build and Deploy the FastAPI Microservice
 Once the cluster and gateway are healthy, deploy the backend application:
 ```bash
