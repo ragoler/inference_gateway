@@ -387,7 +387,9 @@ def _model_status():
         return 2, 2, None  # local/dev: pretend Ready
     ready = desired = 0
     try:
-        dep = apps_v1.read_namespaced_deployment_status(MODEL_DEPLOYMENT_NAME, NAMESPACE)
+        # Read the Deployment object (NOT the /status subresource, which needs a
+        # separate deployments/status RBAC grant); .status is included here.
+        dep = apps_v1.read_namespaced_deployment(MODEL_DEPLOYMENT_NAME, NAMESPACE)
         desired = dep.spec.replicas or 0
         ready = dep.status.ready_replicas or 0
     except Exception:

@@ -163,6 +163,13 @@ helm upgrade --install ${INFERENCE_POOL_NAME} \
  --version ${IGW_CHART_VERSION} \
  oci://us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/charts/inferencepool
 
+echo "=== Step 6b: Attaching the HTTPRoute to gateway ${GATEWAY_NAME} ==="
+# The chart's experimentalHttpRoute hardcodes parentRef name "inference-gateway";
+# repoint it at our actual gateway so a custom GATEWAY_NAME works (otherwise the
+# route attaches to a non-existent gateway and the gateway returns 404).
+kubectl patch httproute ${INFERENCE_POOL_NAME} --type merge \
+  -p "{\"spec\":{\"parentRefs\":[{\"group\":\"gateway.networking.k8s.io\",\"kind\":\"Gateway\",\"name\":\"${GATEWAY_NAME}\"}]}}"
+
 echo "=== Step 7: Tuning the vanilla EPP scorer weights (rollback target) ==="
 # Tune the Helm-installed EPP's prefix-cache weight. This EPP is kept as a fast
 # rollback target; the llm-d EPP in Step 8 becomes the active Endpoint Picker.
