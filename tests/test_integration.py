@@ -52,3 +52,52 @@ def test_health_endpoint():
     data = response.json()
     assert data["status"] == "ok"
     assert data["gateway_ip_configured"] is True
+
+
+@pytest.mark.skipif(not APP_IP, reason="APP_IP environment variable not set")
+def test_status_endpoint():
+    """Backend identity + provisioning state machine."""
+    response = requests.get(f"{BASE_URL}/api/status", timeout=10)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["state"] in ("ready", "provisioning", "reprovisioning", "degraded")
+    assert "hardware" in data
+
+
+@pytest.mark.skipif(not APP_IP, reason="APP_IP environment variable not set")
+def test_loadtest_status_endpoint():
+    """The load-test status endpoint is always queryable (even before any run)."""
+    response = requests.get(f"{BASE_URL}/api/loadtest/status", timeout=10)
+    assert response.status_code == 200
+    data = response.json()
+    assert "phase" in data
+    assert "running" in data
+
+
+@pytest.mark.skipif(not APP_IP, reason="APP_IP environment variable not set")
+def test_loadtest_run_comparison():
+    """Kick off a tiny comparison run and verify both arms report metrics."""
+    import time
+
+    payload = {"concurrency": 2, "num_docs": 2, "queries_per_doc": 2, "max_tokens": 8}
+    start = requests.post(f"{BASE_URL}/api/loadtest", json=payload, timeout=15)
+    # 409 means one is already running — acceptable for a shared environment.
+    assert start.status_code in (200, 409)
+
+    # Poll for completion (small workload; allow generous time for GPU JIT warmup).
+    deadline = time.time() + 240
+    data = {}
+    while time.time() < deadline:
+        data = requests.get(f"{BASE_URL}/api/loadtest/status", timeout=10).json()
+        if not data.get("running") and data.get("phase") in ("done", "error"):
+            break
+        time.sleep(3)
+
+    assert data.get("phase") == "done", f"load test did not finish: {data}"
+    for mode in ("llmd", "direct"):
+        m = data[mode]
+        assert m["requests_total"] == 4  # 2 docs * 2 queries
+        assert "ttft_p95_ms" in m
+        assert "hit_rate" in m
+        assert "throughput_tok_s" in m
+    assert "comparison" in data

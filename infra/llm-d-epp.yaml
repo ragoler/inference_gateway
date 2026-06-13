@@ -47,7 +47,7 @@ data:
       - type: precise-prefix-cache-producer
         parameters:
           tokenProcessorConfig:
-            blockSize: ${BLOCK_SIZE}   # must match vLLM --block-size (CPU 128, GPU 16)
+            blockSize: ${BLOCK_SIZE}   # must match vLLM --block-size (GPU default 16)
           speculativeIndexing: true
           indexerConfig:
             kvBlockIndexConfig:

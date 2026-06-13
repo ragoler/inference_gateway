@@ -40,18 +40,32 @@ case "${1:-}" in
 esac
 
 # ---------------------------------------------------------------------------
-# Backend selection: BACKEND=cpu|gpu (from .env) picks the model-server manifest,
-# the Custom Compute Class, and the KV block size (which MUST match between the
-# vLLM --block-size and the EPP tokenProcessorConfig.blockSize).
+# GPU-only load-test comparison demo. All model-server replicas SHARE one GPU via
+# the gpu-flex ComputeClass GPU-sharing config; an internal gke-l7-rilb gateway
+# (llm-d EPP) and a plain vllm-direct Service form the two comparison arms.
+#
+#   BLOCK_SIZE            KV block size; MUST match vLLM --block-size <-> EPP blockSize
+#   REPLICAS             # of vLLM pods sharing one GPU
+#   GPU_MEM_UTIL          per-pod --gpu-memory-utilization (sum across REPLICAS < ~0.9)
+#   GPU_SHARING_STRATEGY  TIME_SHARING | MPS  (MPS also needs hostIPC:true on the pod)
+#   GPU_MAX_SHARED        ComputeClass maxSharedClientsPerGPU (must be >= REPLICAS)
+#   GATEWAY_CLASS         gke-l7-rilb (internal, apples-to-apples) | gke-l7-regional-external-managed
 # ---------------------------------------------------------------------------
-BACKEND="${BACKEND:-cpu}"
-case "$BACKEND" in
-  cpu) MODEL_DEPLOYMENT="infra/cpu-deployment.yaml"; COMPUTE_CLASS_FILE="infra/computeclass-cpu.yaml"; BLOCK_SIZE="${BLOCK_SIZE:-128}" ;;
-  gpu) MODEL_DEPLOYMENT="infra/gpu-deployment.yaml"; COMPUTE_CLASS_FILE="infra/computeclass-gpu.yaml"; BLOCK_SIZE="${BLOCK_SIZE:-16}" ;;
-  *) echo "BACKEND must be 'cpu' or 'gpu' (got: $BACKEND)"; exit 1 ;;
-esac
-export BACKEND BLOCK_SIZE
-echo "Backend: ${BACKEND}  (deployment=${MODEL_DEPLOYMENT}, compute-class=${COMPUTE_CLASS_FILE}, block_size=${BLOCK_SIZE})"
+BACKEND="gpu"
+MODEL_DEPLOYMENT="infra/gpu-deployment.yaml"
+COMPUTE_CLASS_FILE="infra/computeclass-gpu.yaml"
+BLOCK_SIZE="${BLOCK_SIZE:-16}"
+REPLICAS="${REPLICAS:-4}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.20}"
+GPU_SHARING_STRATEGY="${GPU_SHARING_STRATEGY:-TIME_SHARING}"
+GPU_MAX_SHARED="${GPU_MAX_SHARED:-4}"
+GATEWAY_CLASS="${GATEWAY_CLASS:-gke-l7-rilb}"
+export BACKEND BLOCK_SIZE REPLICAS GPU_MEM_UTIL GPU_SHARING_STRATEGY GPU_MAX_SHARED GATEWAY_CLASS
+echo "GPU demo: ${REPLICAS} pods sharing 1 GPU (${GPU_SHARING_STRATEGY}, max ${GPU_MAX_SHARED}/GPU),"
+echo "  block_size=${BLOCK_SIZE}, gpu_mem_util=${GPU_MEM_UTIL}, gateway_class=${GATEWAY_CLASS}"
+if [ "${GPU_MAX_SHARED}" -lt "${REPLICAS}" ]; then
+  echo "Error: GPU_MAX_SHARED (${GPU_MAX_SHARED}) must be >= REPLICAS (${REPLICAS})."; exit 1
+fi
 
 # Check and install helm locally if needed (OS/arch-aware download).
 if ! command -v helm &> /dev/null; then
@@ -74,10 +88,11 @@ teardown_resources() {
   export MODEL_NAME GATEWAY_NAME KV_CACHE_SPACE BLOCK_SIZE INFERENCE_POOL_NAME=vllm-server
   kubectl delete -f infra/inference-objective.yaml --ignore-not-found || true
   render infra/llm-d-epp.yaml | kubectl delete -f - --ignore-not-found || true
+  kubectl delete -f infra/vllm-direct.yaml --ignore-not-found || true
   helm uninstall "${INFERENCE_POOL_NAME}" || true
   render "${MODEL_DEPLOYMENT}" | kubectl delete -f - --ignore-not-found || true
   render infra/gateway.yaml | kubectl delete -f - --ignore-not-found || true
-  kubectl delete -f "${COMPUTE_CLASS_FILE}" --ignore-not-found || true
+  render "${COMPUTE_CLASS_FILE}" | kubectl delete -f - --ignore-not-found || true
   echo "Resource teardown complete."
 }
 
@@ -120,7 +135,7 @@ gcloud container clusters get-credentials "${CLUSTER_NAME}" \
   --project="${PROJECT_ID}" \
   --zone="${ZONE}"
 
-echo "=== Step 2b: Ensuring a proxy-only subnet exists (required for the regional external gateway) ==="
+echo "=== Step 2b: Ensuring a proxy-only subnet exists (required for the regional gateway, internal or external) ==="
 REGION="${REGION:-${ZONE%-*}}"
 if gcloud compute networks subnets list --project="${PROJECT_ID}" \
      --filter="purpose=REGIONAL_MANAGED_PROXY AND region:${REGION}" --format="value(name)" | grep -q .; then
@@ -139,13 +154,16 @@ echo "=== Step 4: Deploying GKE Inference Gateway ==="
 export GATEWAY_NAME="${GATEWAY_NAME}"
 render infra/gateway.yaml | kubectl apply -f -
 
-echo "=== Step 4b: Applying ${BACKEND} Custom Compute Class (spot -> on-demand, family fallback) ==="
-kubectl apply -f "${COMPUTE_CLASS_FILE}"
+echo "=== Step 4b: Applying GPU Custom Compute Class (GPU sharing; spot -> on-demand, G4 -> G2) ==="
+render "${COMPUTE_CLASS_FILE}" | kubectl apply -f -
 
-echo "=== Step 5: Deploying ${BACKEND}-based vLLM Model Server ==="
+echo "=== Step 5: Deploying ${REPLICAS} vLLM pods sharing one GPU ==="
 export MODEL_NAME="${MODEL_NAME}"
 export KV_CACHE_SPACE="${KV_CACHE_SPACE}"
 render "${MODEL_DEPLOYMENT}" | kubectl apply -f -
+
+echo "=== Step 5b: Applying vllm-direct Service (the 'without llm-d' round-robin baseline) ==="
+kubectl apply -f infra/vllm-direct.yaml
 
 echo "=== Step 6: Deploying InferencePool and EPP using Helm ==="
 export INFERENCE_POOL_NAME=vllm-server

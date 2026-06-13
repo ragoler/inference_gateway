@@ -1,14 +1,33 @@
-# GPU Custom Compute Class: prefer the newer small GPU (G4 = NVIDIA RTX PRO 6000
-# Blackwell) on spot, fall back to on-demand, then to G2 (NVIDIA L4) spot, then G2
-# on-demand. Model-server pods select this via nodeSelector
-# cloud.google.com/compute-class: gpu-flex. Requires Node Auto-Provisioning.
+# GPU Custom Compute Class for the load-test comparison demo.
 #
-# Each GPU priority MUST carry a `gpu` block (type + count); machineFamily is optional
-# and just narrows the search. Accelerator type strings: G4 = nvidia-rtx-pro-6000,
-# G2 = nvidia-l4. RTX PRO 6000 needs driver 580+, so the G4 tiers use driverVersion: latest.
+# Goal: pack ALL model-server replicas onto ONE physical GPU via GPU sharing, so
+# the demo needs only a single GPU (8 separate GPU machines are hard to get). The
+# 1.5B model is tiny, so 4 vLLM pods comfortably share one RTX PRO 6000 (96 GB).
 #
-# NOTE: full-G4 regional availability is not guaranteed in every zone; if NAP cannot
-# provision G4 in this zone, it falls through to the G2/L4 tiers automatically.
+# Tier fallback: prefer the newer small GPU (G4 = NVIDIA RTX PRO 6000 Blackwell)
+# on spot, fall back to on-demand, then to G2 (NVIDIA L4) spot, then G2 on-demand.
+# Model-server pods select this via nodeSelector cloud.google.com/compute-class:
+# gpu-flex. Requires Node Auto-Provisioning.
+#
+# GPU sharing (sharingStrategy + maxSharedClientsPerGPU) lets N pods that each
+# request `nvidia.com/gpu: 1` co-schedule on one physical GPU:
+#   - TIME_SHARING: round-robin context switching, software memory/fault isolation,
+#     no special pod settings. Simplest; what we use by default.
+#   - MPS: concurrent kernels (better throughput) but needs hostIPC:true on pods
+#     and gives no fault isolation. Switch GPU_SHARING_STRATEGY=MPS to try it.
+# maxSharedClientsPerGPU MUST be >= the model-server replica count (REPLICAS).
+#
+# Accelerator type strings: G4 = nvidia-rtx-pro-6000, G2 = nvidia-l4.
+# RTX PRO 6000 needs driver 580+, so the G4 tiers use driverVersion: latest.
+#
+# PREREQUISITES (verify before deploying):
+#   * GPU sharing in a ComputeClass requires GKE >= 1.35.2-gke.1485000.
+#   * On some recent GKE versions, GPU-sharing nodes have advertised only
+#     Allocatable nvidia.com/gpu: 1 (a regression). Confirm the node advertises
+#     `${GPU_MAX_SHARED:-4}` allocatable GPUs after the first node is created; if
+#     not, lower REPLICAS or use 2 GPUs.
+#   * full-G4 regional availability is not guaranteed in every zone; if NAP cannot
+#     provision G4 in this zone, it falls through to the G2/L4 tiers automatically.
 apiVersion: cloud.google.com/v1
 kind: ComputeClass
 metadata:
@@ -20,24 +39,36 @@ spec:
         type: nvidia-rtx-pro-6000
         count: 1
         driverVersion: latest
+        gpuSharing:
+          sharingStrategy: ${GPU_SHARING_STRATEGY}
+          maxSharedClientsPerGPU: ${GPU_MAX_SHARED}
       spot: true
     - machineFamily: g4
       gpu:
         type: nvidia-rtx-pro-6000
         count: 1
         driverVersion: latest
+        gpuSharing:
+          sharingStrategy: ${GPU_SHARING_STRATEGY}
+          maxSharedClientsPerGPU: ${GPU_MAX_SHARED}
       spot: false
     - machineFamily: g2
       gpu:
         type: nvidia-l4
         count: 1
         driverVersion: default
+        gpuSharing:
+          sharingStrategy: ${GPU_SHARING_STRATEGY}
+          maxSharedClientsPerGPU: ${GPU_MAX_SHARED}
       spot: true
     - machineFamily: g2
       gpu:
         type: nvidia-l4
         count: 1
         driverVersion: default
+        gpuSharing:
+          sharingStrategy: ${GPU_SHARING_STRATEGY}
+          maxSharedClientsPerGPU: ${GPU_MAX_SHARED}
       spot: false
   nodePoolAutoCreation:
     enabled: true

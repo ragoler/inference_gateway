@@ -8,7 +8,7 @@ else
   echo "Error: .env file not found."
   exit 1
 fi
-echo "=== Targeting cluster ${CLUSTER_NAME} (${ZONE}), backend=${BACKEND:-cpu} ==="
+echo "=== Targeting cluster ${CLUSTER_NAME} (${ZONE}), backend=${BACKEND:-gpu} ==="
 gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}"
 
 echo "=== Discovering Application Service IP ==="

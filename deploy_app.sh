@@ -11,14 +11,16 @@ fi
 REGION="${REGION:-${ZONE%-*}}"
 REPO_NAME="inference-gateway-client"
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+# Per-cluster image tag so multiple clusters never clobber each other's image
+# (the old shared :latest meant one cluster's rebuild broke another's pods).
+IMAGE_TAG="${IMAGE_TAG:-${CLUSTER_NAME}}"
+IMAGE="${REGISTRY}/gateway-client-app:${IMAGE_TAG}"
 
 # Point kubectl at the cluster named in .env so we never deploy to the wrong
 # cluster (e.g. an existing demo cluster) based on the ambient context.
 echo "=== Targeting cluster ${CLUSTER_NAME} (${ZONE}) ==="
 gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}"
 
-# The app image is backend-agnostic (one build for both clusters); the CPU/GPU
-# difference is the BACKEND env injected into the Deployment below.
 echo "=== Creating Artifact Registry Repository ==="
 gcloud artifacts repositories create "$REPO_NAME" \
     --repository-format=docker \
@@ -28,11 +30,11 @@ gcloud artifacts repositories create "$REPO_NAME" \
 echo "=== Authenticating Docker ==="
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
-echo "=== Building Application Image (linux/amd64 for GKE nodes) ==="
-docker build --platform linux/amd64 -t "${REGISTRY}/gateway-client-app:latest" ./app
+echo "=== Building Application Image (linux/amd64 for GKE nodes): ${IMAGE} ==="
+docker build --platform linux/amd64 -t "${IMAGE}" ./app
 
 echo "=== Pushing Application Image ==="
-docker push "${REGISTRY}/gateway-client-app:latest"
+docker push "${IMAGE}"
 
 echo "=== Discovering Gateway IP ==="
 echo "Waiting for Gateway ${GATEWAY_NAME} to receive an IP..."
@@ -52,17 +54,18 @@ fi
 
 echo "=== Deploying Application Manifests ==="
 export REGISTRY="${REGISTRY}"
+export IMAGE_TAG="${IMAGE_TAG}"
 export GATEWAY_IP="${GATEWAY_IP}"
 export MODEL_NAME="${MODEL_NAME}"
-export BACKEND="${BACKEND:-cpu}"   # shown in the UI; one backend per cluster
+export BACKEND="${BACKEND:-gpu}"   # shown in the UI badge
 
 kubectl apply -f k8s/rbac.yaml
 # Portable variable substitution (envsubst is not installed by default on macOS).
 python3 -c "import os,sys; sys.stdout.write(os.path.expandvars(open('k8s/app-deployment.yaml').read()))" | kubectl apply -f -
 kubectl apply -f k8s/app-service.yaml
 
-# The image tag stays :latest, so an unchanged Deployment spec won't trigger a
-# new pull. Force a rollout to pick up the freshly pushed image.
+# The per-cluster tag is stable, so an unchanged Deployment spec won't trigger a
+# new pull. Force a rollout to pick up the freshly pushed image (pull policy Always).
 echo "=== Rolling out new image ==="
 kubectl rollout restart deployment/gateway-client-app
 kubectl rollout status deployment/gateway-client-app --timeout=180s

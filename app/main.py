@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import httpx
 
+from loadtest_util import make_documents, build_prompts, summarize, compare
+
 # Attempt to import kubernetes (only available when running in-cluster)
 try:
     from kubernetes import client, config
@@ -35,9 +37,13 @@ MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct")
 NAMESPACE = os.getenv("POD_NAMESPACE", "default")
 POD_SELECTOR = os.getenv("POD_SELECTOR", "app=vllm-server")
 METRICS_PORT = os.getenv("METRICS_PORT", "8000")
-# Which hardware this cluster serves (shown in the UI). One backend per cluster.
-BACKEND = os.getenv("BACKEND", "cpu")
+# Which hardware this cluster serves (shown in the UI). GPU-only since the demo
+# pivoted to the load-test comparison; kept configurable for the badge.
+BACKEND = os.getenv("BACKEND", "gpu")
 MODEL_DEPLOYMENT_NAME = os.getenv("MODEL_DEPLOYMENT_NAME", "vllm-server")
+# The "without llm-d" baseline: a plain ClusterIP Service over the same pods
+# (cache-blind round-robin). The load-test runner targets this for the direct arm.
+DIRECT_URL = os.getenv("DIRECT_URL", "http://vllm-direct")
 # Tracks whether the model server was ever Ready, to distinguish first-time
 # provisioning from re-provisioning after a spot reclaim.
 _was_ready = False
@@ -56,7 +62,7 @@ class GenerateRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # vLLM metric scraping helpers
 #
-# Real metric names exposed by vllm/vllm-openai-cpu (verified on the live
+# Real metric names exposed by vllm/vllm-openai (verified on the live
 # cluster, vLLM 0.22.0):
 #   vllm:kv_cache_usage_perc        -> KV cache utilization (0..1)
 #   vllm:num_requests_waiting       -> queue depth
@@ -282,9 +288,9 @@ async def generate_text(request: GenerateRequest):
         "stream_options": {"include_usage": True},
     }
 
-    # CPU prefill is slow (~10s), so when both pods are busy the gateway briefly
-    # returns 503 (backend saturation). Retry a few times so quick demo clicks
-    # don't fail spuriously.
+    # When all pods are busy (or paying a one-time GPU JIT compile) the gateway
+    # can briefly return 503 (backend saturation). Retry a few times so quick demo
+    # clicks don't fail spuriously.
     global _active_generates
     MAX_ATTEMPTS = 4
     RETRY_STATUSES = {503, 429}
@@ -438,9 +444,9 @@ async def get_telemetry():
         # Fallback for local verification/testing without a cluster.
         return {
             "nodes": [
-                {"name": "vllm-cpu-server-local-1", "kv_cache_usage": 0.0, "queue_length": 0,
+                {"name": "vllm-server-local-1", "kv_cache_usage": 0.0, "queue_length": 0,
                  "running": 1, "hit_ratio": 0.0, "cached_tokens": 0, "blocks_cached": 0, "evictions": 0},
-                {"name": "vllm-cpu-server-local-2", "kv_cache_usage": 0.0, "queue_length": 1,
+                {"name": "vllm-server-local-2", "kv_cache_usage": 0.0, "queue_length": 1,
                  "running": 0, "hit_ratio": 0.0, "cached_tokens": 0, "blocks_cached": 0, "evictions": 0},
             ],
             "kv_events": False,
@@ -472,8 +478,172 @@ async def get_telemetry():
         return {"nodes": nodes, "kv_events": KV_EVENTS_AVAILABLE}
     except Exception as e:
         return {"error": str(e), "nodes": []}
+
+
+# ---------------------------------------------------------------------------
+# Load-test comparison: WITH llm-d (gateway) vs WITHOUT llm-d (plain Service)
+#
+# Fires an identical concurrent workload at each path and reports hit rate,
+# p50/p95 TTFT, throughput, and how work spread across pods. The headline:
+# cache-aware routing (llm-d) reuses prefixes -> higher hit rate -> the shared
+# GPU wastes less compute on redundant prefill -> better tail latency/throughput.
+#
+# Hit rate is measured cluster-wide (sum of vLLM prefix_cache_{hits,queries}_total
+# deltas across pods) so it stays correct under concurrency, where per-request
+# delta attribution is racy. Each mode uses its own fresh document nonce so the
+# two arms never share a warm cache.
+# ---------------------------------------------------------------------------
+
+class LoadTestRequest(BaseModel):
+    concurrency: int = 8
+    num_docs: int = 8
+    queries_per_doc: int = 4
+    max_tokens: int = 16
+
+
+_loadtest = {
+    "running": False,
+    "phase": "idle",     # idle | running:direct | running:llmd | done | error
+    "params": None,
+    "direct": None,
+    "llmd": None,
+    "comparison": None,
+    "error": None,
+}
+_loadtest_seq = 0
+
+
+async def _sum_prefix_counters(http_client) -> tuple:
+    """(total_queries, total_hits, {pod: queries}) across all running vLLM pods."""
+    q = h = 0.0
+    per_pod = {}
+    for name, ip in list_vllm_pods():
+        m = await scrape_pod(http_client, ip)
+        q += m["prefix_queries"]
+        h += m["prefix_hits"]
+        per_pod[name] = m["prefix_queries"]
+    return q, h, per_pod
+
+
+async def _one_request(http_client, base_url, prompt, max_tokens, sem) -> dict:
+    """Issue one streamed completion; measure TTFT and output tokens."""
+    payload = {
+        "model": MODEL_NAME,
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    async with sem:
+        start = time.perf_counter()
+        ttft_ms = None
+        out_tokens = 0
+        ok = False
+        try:
+            async with http_client.stream(
+                "POST", f"{base_url}/v1/completions", json=payload, timeout=180.0
+            ) as resp:
+                if resp.status_code != 200:
+                    await resp.aread()
+                    return {"ok": False, "ttft_ms": None, "out_tokens": 0}
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if choices and choices[0].get("text") and ttft_ms is None:
+                        ttft_ms = (time.perf_counter() - start) * 1000.0
+                    if chunk.get("usage"):
+                        out_tokens = chunk["usage"].get("completion_tokens", out_tokens)
+                ok = True
+        except Exception:
+            ok = False
+        return {"ok": ok, "ttft_ms": ttft_ms, "out_tokens": out_tokens}
+
+
+async def _run_mode(http_client, base_url, docs, p) -> dict:
+    """Run the full workload against one base_url and summarize it."""
+    prompts = build_prompts(docs, p.queries_per_doc)
+    sem = asyncio.Semaphore(max(1, p.concurrency))
+
+    q0, h0, pod0 = await _sum_prefix_counters(http_client)
+    t0 = time.perf_counter()
+    records = await asyncio.gather(
+        *[_one_request(http_client, base_url, prompt, p.max_tokens, sem)
+          for _doc_id, prompt in prompts]
+    )
+    wall_s = time.perf_counter() - t0
+    await asyncio.sleep(1.0)  # let cumulative counters settle after the burst
+    q1, h1, pod1 = await _sum_prefix_counters(http_client)
+
+    dq = max(q1 - q0, 0.0)
+    dh = max(h1 - h0, 0.0)
+    hit_rate = (dh / dq) if dq > 0 else 0.0
+    pod_spread = {name: int(pod1.get(name, 0) - pod0.get(name, 0)) for name in pod1}
+    return summarize(records, wall_s, hit_rate, pod_spread)
+
+
+async def _run_loadtest(p: LoadTestRequest, nonce: str):
+    """Run both arms back-to-back with independent document sets."""
+    global _loadtest
+    gateway_url = f"http://{GATEWAY_IP}:80"
+    try:
+        async with httpx.AsyncClient() as http_client:
+            # Direct (no llm-d) first, then llm-d — independent nonces so neither
+            # benefits from the other's warm cache.
+            _loadtest["phase"] = "running:direct"
+            direct_docs = make_documents(p.num_docs, f"d{nonce}")
+            _loadtest["direct"] = await _run_mode(http_client, DIRECT_URL, direct_docs, p)
+
+            _loadtest["phase"] = "running:llmd"
+            llmd_docs = make_documents(p.num_docs, f"l{nonce}")
+            _loadtest["llmd"] = await _run_mode(http_client, gateway_url, llmd_docs, p)
+
+            _loadtest["comparison"] = compare(_loadtest["llmd"], _loadtest["direct"])
+            _loadtest["phase"] = "done"
     except Exception as e:
-        return {"error": str(e), "nodes": []}
+        _loadtest["error"] = str(e)
+        _loadtest["phase"] = "error"
+    finally:
+        _loadtest["running"] = False
+
+
+@app.post("/api/loadtest")
+async def start_loadtest(req: LoadTestRequest):
+    """Kick off a comparison run in the background; poll /api/loadtest/status."""
+    global _loadtest, _loadtest_seq
+    if not GATEWAY_IP:
+        raise HTTPException(status_code=500, detail="GATEWAY_IP not set")
+    if _loadtest["running"]:
+        raise HTTPException(status_code=409, detail="A load test is already running.")
+    # Clamp inputs so a stray UI value can't launch thousands of requests.
+    req.concurrency = max(1, min(req.concurrency, 64))
+    req.num_docs = max(1, min(req.num_docs, 64))
+    req.queries_per_doc = max(1, min(req.queries_per_doc, 32))
+    req.max_tokens = max(1, min(req.max_tokens, 256))
+
+    _loadtest_seq += 1
+    nonce = f"{_loadtest_seq}{int(time.time()) % 100000}"
+    _loadtest = {
+        "running": True, "phase": "running:direct", "params": req.dict(),
+        "direct": None, "llmd": None, "comparison": None, "error": None,
+    }
+    asyncio.create_task(_run_loadtest(req, nonce))
+    total = req.num_docs * req.queries_per_doc
+    return {"started": True, "requests_per_mode": total, "params": req.dict()}
+
+
+@app.get("/api/loadtest/status")
+async def loadtest_status():
+    """Current load-test progress + per-mode results + headline comparison."""
+    return _loadtest
 
 
 # Explicitly serve index.html at root route

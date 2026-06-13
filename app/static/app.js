@@ -48,7 +48,180 @@ document.addEventListener("DOMContentLoaded", () => {
     setInterval(pollStatus, 2500);
     renderTtftGraph();
     updateCtxTokens();
+    pollLoadTest();   // restore any in-progress / last comparison on load
 });
+
+// --------------------------------------------------------------------------
+// Tabs: Load Test (primary) vs Playground (secondary single-request demo)
+// --------------------------------------------------------------------------
+function switchTab(name) {
+    const tabs = ["loadtest", "playground"];
+    tabs.forEach((t) => {
+        const pane = document.getElementById(`tab-${t}`);
+        const btn = document.getElementById(`tabbtn-${t}`);
+        const active = t === name;
+        pane.classList.toggle("hidden", !active);
+        btn.className = "px-4 py-3 text-sm font-medium border-b-2 " +
+            (active ? "border-sky-400 text-sky-300" : "border-transparent text-slate-400 hover:text-slate-200");
+    });
+}
+
+// --------------------------------------------------------------------------
+// Load-test comparison: WITH llm-d (gateway) vs WITHOUT (round-robin Service)
+// --------------------------------------------------------------------------
+let loadtestPolling = false;
+
+async function runLoadTest() {
+    if (!backendReady) { setLtProgress("Backend is still provisioning — wait until it is Ready.", true); return; }
+    const body = {
+        concurrency: parseInt(document.getElementById("lt-concurrency").value, 10) || 8,
+        num_docs: parseInt(document.getElementById("lt-numdocs").value, 10) || 8,
+        queries_per_doc: parseInt(document.getElementById("lt-queries").value, 10) || 4,
+        max_tokens: parseInt(document.getElementById("lt-maxtokens").value, 10) || 16,
+    };
+    setLtRunning(true);
+    setLtProgress("Starting…");
+    try {
+        const resp = await fetch("/api/loadtest", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            setLtProgress(`Could not start: ${err.detail || resp.status}`, true);
+            setLtRunning(false);
+            return;
+        }
+        const d = await resp.json();
+        setLtProgress(`Running ${d.requests_per_mode} requests per mode (direct, then llm-d)…`);
+        if (!loadtestPolling) pollLoadTest();
+    } catch (err) {
+        setLtProgress(`Error: ${err.message}`, true);
+        setLtRunning(false);
+    }
+}
+
+async function pollLoadTest() {
+    loadtestPolling = true;
+    try {
+        const d = await (await fetch("/api/loadtest/status")).json();
+        renderLoadTest(d);
+        if (d.running) {
+            setLtRunning(true);
+            const phase = d.phase === "running:direct" ? "Running round-robin (without llm-d)…"
+                        : d.phase === "running:llmd" ? "Running llm-d (cache-aware)…" : "Running…";
+            setLtProgress(phase);
+            setTimeout(pollLoadTest, 2000);
+        } else {
+            loadtestPolling = false;
+            setLtRunning(false);
+            if (d.phase === "done") setLtProgress("Comparison complete.");
+            else if (d.phase === "error") setLtProgress(`Failed: ${d.error || "unknown error"}`, true);
+        }
+    } catch (err) {
+        loadtestPolling = false;
+        setLtRunning(false);
+        setLtProgress(`Status error: ${err.message}`, true);
+    }
+}
+
+function setLtRunning(running) {
+    const btn = document.getElementById("loadtest-run");
+    btn.disabled = running;
+    btn.classList.toggle("opacity-50", running);
+    btn.classList.toggle("cursor-not-allowed", running);
+    btn.innerText = running ? "Running…" : "Run comparison";
+}
+
+function setLtProgress(msg, isError = false) {
+    const el = document.getElementById("lt-progress");
+    el.innerText = msg;
+    el.className = "mt-4 text-sm font-mono " + (isError ? "text-amber-400" : "text-slate-400");
+}
+
+function renderLoadTest(d) {
+    document.getElementById("lt-col-llmd").innerHTML =
+        ltColumn("With llm-d", "cache-aware routing", d.llmd, "sky", d.running && d.phase === "running:llmd");
+    document.getElementById("lt-col-direct").innerHTML =
+        ltColumn("Without llm-d", "round-robin Service", d.direct, "slate", d.running && d.phase === "running:direct");
+    renderLtHeadline(d);
+}
+
+// Render one result column. metrics may be null (not run yet / in progress).
+function ltColumn(title, subtitle, m, accent, active) {
+    const accentText = accent === "sky" ? "text-sky-400" : "text-slate-300";
+    const accentBar = accent === "sky" ? "bg-sky-400" : "bg-slate-400";
+    if (!m) {
+        const state = active
+            ? `<span class="text-amber-400 animate-pulse">running…</span>`
+            : `<span class="text-slate-600">not run yet</span>`;
+        return `<div class="bg-slate-800 rounded-xl p-6 border border-slate-700 h-full">
+            <h3 class="text-lg font-semibold ${accentText}">${title}</h3>
+            <p class="text-xs text-slate-500 mb-4">${subtitle}</p>
+            <div class="text-sm font-mono">${state}</div></div>`;
+    }
+    const hitPct = Math.round((m.hit_rate || 0) * 100);
+    const spread = m.pod_spread || {};
+    const maxSpread = Math.max(1, ...Object.values(spread));
+    const spreadRows = Object.keys(spread).sort().map((name, i) => {
+        const v = spread[name] || 0;
+        const w = Math.round((v / maxSpread) * 100);
+        const short = name.replace(/^vllm-server-/, "");
+        return `<div class="flex items-center space-x-2 text-[11px] font-mono">
+            <span class="text-slate-500 w-24 truncate" title="${name}">pod ${i + 1}</span>
+            <div class="flex-1 bg-slate-900 h-2 rounded-full overflow-hidden"><div class="h-full ${accentBar}" style="width:${w}%"></div></div>
+            <span class="text-slate-400 w-20 text-right">${v.toLocaleString()} q</span></div>`;
+    }).join("");
+
+    return `<div class="bg-slate-800 rounded-xl p-6 border border-slate-700 h-full flex flex-col">
+        <h3 class="text-lg font-semibold ${accentText}">${title}</h3>
+        <p class="text-xs text-slate-500 mb-4">${subtitle}</p>
+
+        <div class="text-center mb-4">
+            <div class="text-5xl font-bold ${accentText}">${hitPct}%</div>
+            <div class="text-xs text-slate-500 uppercase tracking-wider">prefix cache hit rate</div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3 text-sm">
+            ${ltStat("p50 TTFT", fmtMs(m.ttft_p50_ms))}
+            ${ltStat("p95 TTFT", fmtMs(m.ttft_p95_ms))}
+            ${ltStat("Throughput", `${(m.throughput_tok_s || 0).toLocaleString()} tok/s`)}
+            ${ltStat("Requests", `${m.requests_ok}/${m.requests_total}${m.requests_failed ? ` (${m.requests_failed} failed)` : ""}`)}
+        </div>
+
+        <div class="mt-4 pt-4 border-t border-slate-700/50">
+            <div class="text-xs text-slate-500 mb-2">Work per pod (prefix-cache queries)</div>
+            <div class="space-y-1.5">${spreadRows || '<span class="text-xs text-slate-600">no pod data</span>'}</div>
+        </div>
+    </div>`;
+}
+
+function ltStat(label, value) {
+    return `<div class="bg-slate-900/60 rounded-lg p-3 flex flex-col">
+        <span class="text-[11px] text-slate-500">${label}</span>
+        <span class="font-mono text-slate-200">${value}</span></div>`;
+}
+
+function fmtMs(ms) {
+    if (ms == null) return "n/a";
+    return ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${Math.round(ms)} ms`;
+}
+
+function renderLtHeadline(d) {
+    const el = document.getElementById("lt-headline");
+    const c = d.comparison;
+    if (!c || !d.llmd || !d.direct) { el.classList.add("hidden"); return; }
+    el.classList.remove("hidden");
+    const speedup = c.ttft_p95_speedup ? `${c.ttft_p95_speedup}×` : "—";
+    const tput = c.throughput_ratio ? `${c.throughput_ratio}×` : "—";
+    const hitGain = c.hit_rate_gain != null ? `${(c.hit_rate_gain * 100).toFixed(0)} pts` : "—";
+    el.innerHTML = `
+        <div class="text-sm text-slate-400 mb-2">With llm-d, on the same shared GPU and identical workload:</div>
+        <div class="flex flex-wrap justify-center gap-8">
+            <div><span class="text-3xl font-bold text-sky-300">${speedup}</span><div class="text-xs text-slate-500">lower p95 TTFT</div></div>
+            <div><span class="text-3xl font-bold text-emerald-300">+${hitGain}</span><div class="text-xs text-slate-500">cache hit rate</div></div>
+            <div><span class="text-3xl font-bold text-sky-300">${tput}</span><div class="text-xs text-slate-500">throughput</div></div>
+        </div>`;
+}
 
 // Backend identity + provisioning state (CPU/GPU, and whether the model server is up).
 async function pollStatus() {
@@ -277,8 +450,8 @@ function renderNodes(nodes) {
                     <span class="font-mono ${running > 0 ? 'text-emerald-400' : 'text-slate-400'}">${running} req</span>
                 </div>
                 <div class="flex flex-col col-span-2">
-                    <span class="text-slate-500">KV Cache capacity</span>
-                    <span class="font-mono text-slate-400">4.0 GB &middot; 1170 blocks &middot; 128 tok/block</span>
+                    <span class="text-slate-500">KV cache usage</span>
+                    <span class="font-mono text-slate-400">${Math.round((node.kv_cache_usage || 0) * 100)}% of GPU KV cache</span>
                 </div>
             </div>
         `;
@@ -287,7 +460,7 @@ function renderNodes(nodes) {
         // Real eviction signal from vLLM KV events: flash + log when blocks are evicted.
         if (node.name in prevEvictions && evictions > prevEvictions[node.name]) {
             const n = evictions - prevEvictions[node.name];
-            const podShort = node.name.replace(/^vllm-cpu-server-[^-]+-/, "");
+            const podShort = node.name.replace(/^vllm-server-[^-]+-/, "");
             logEvent(`⚠ LRU eviction on pod ${podShort}: ${n} KV block(s) evicted (cache saturated).`, true);
             card.classList.add("border-amber-400", "bg-amber-950/30");
             setTimeout(() => card.classList.remove("border-amber-400", "bg-amber-950/30"), 2200);
@@ -319,9 +492,10 @@ async function executeRequest() {
     const streamBadge = document.getElementById("routing-stream");
     streamBadge.className = `text-xs px-3 py-1 rounded-full font-mono transition-all ${streamClass}`;
     streamBadge.innerText = `${ctxKey} → prefilling…`;
-    // Set the latency expectation up front: on CPU, a cold prefix is computed on
-    // the worker for ~10-20s before the first token; a warm cache hit is ~1-3s.
-    logEvent(`Sent [${ctxKey}]. Cold prefill on CPU takes ~10-20s before the worker responds; a warm cache hit is ~1-3s.`);
+    // Set the latency expectation up front: a cold prefix is prefilled on the
+    // worker before the first token; a warm cache hit skips most of that. On GPU
+    // the first request to a pod/shape also pays a one-time ~20s JIT compile.
+    logEvent(`Sent [${ctxKey}]. A cold prefix is prefilled before the first token; a warm cache hit returns faster. (First-ever request per pod also pays a one-time GPU JIT compile.)`);
 
     try {
         const response = await fetch("/generate", {
@@ -338,7 +512,7 @@ async function executeRequest() {
             const hit = routing.cache_hit === true;
             const servedBy = routing.served_by;
             const approx = routing.confidence === "approximate";
-            const podShort = servedBy ? servedBy.replace(/^vllm-cpu-server-[^-]+-/, "") : "?";
+            const podShort = servedBy ? servedBy.replace(/^vllm-server-[^-]+-/, "") : "?";
             const podLabel = approx ? `${podShort} (approx)` : podShort;
             const ttftStr = (ttft != null) ? `${(ttft / 1000).toFixed(2)}s` : "n/a";
 

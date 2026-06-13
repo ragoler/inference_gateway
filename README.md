@@ -1,194 +1,191 @@
-# Inference Gateway on GKE with FastAPI Application
+# Inference Gateway on GKE — llm-d Load-Test Comparison
 
-This repository automates the provisioning, configuration, and deployment of a Google Kubernetes Engine (GKE) cluster configured with the Kubernetes Gateway API Inference Extension. It routes LLM inference traffic to a CPU-based vLLM model server pool and provides a production-ready FastAPI consumer application.
+This repository provisions a GKE cluster with the Kubernetes Gateway API Inference
+Extension and **llm-d precise prefix-cache routing**, runs several vLLM model
+servers **sharing one GPU**, and serves a FastAPI app + UI that proves the value
+of cache-aware routing with a **side-by-side load test**: the same concurrent
+workload run **with llm-d** (cache-aware) vs **without llm-d** (a plain round-robin
+Service).
+
+> A single request on a fast GPU barely shows a difference. Under load it is
+> obvious: cache-blind routing scatters repeated documents across pods and
+> re-prefills them everywhere; llm-d routes each document's repeats to the pod
+> that already holds its prefix, so the shared GPU wastes far less compute.
 
 ---
 
 ## 🏗️ Architecture Overview
 
-The system architecture is divided into three primary layers:
-
-1. **Infrastructure Tier**: A dedicated GKE Cluster provisioned with the standard Kubernetes Gateway API.
-2. **Inference Tier**:
-   - **L7 Managed External Gateway** (`gke-l7-regional-external-managed`).
-   - **Endpoint Picker (EPP) Extension**: Optimally balances requests across inference pools.
-   - **vLLM CPU Model Servers**: Running high-performance serving for HuggingFace models (e.g., `Qwen/Qwen2.5-1.5B-Instruct`).
-3. **Application Tier**:
-   - A fully containerized Python FastAPI microservice running inside the cluster.
-   - Exposes clean REST APIs (`/generate`) and seamlessly interacts with the backend Inference Gateway.
+1. **Infrastructure**: a GKE cluster with the Gateway API and Node
+   Auto-Provisioning. A small on-demand default pool hosts the gateway/EPP/app;
+   the vLLM model servers run on the `gpu-flex` Custom Compute Class.
+2. **Inference**:
+   - **Internal L7 Gateway** (`gke-l7-rilb`) so the llm-d path is in-cluster,
+     apples-to-apples with the in-cluster baseline.
+   - **llm-d Endpoint Picker (EPP)** — precise prefix-cache routing from vLLM
+     KV-cache events (the "with llm-d" arm).
+   - **`vllm-direct` ClusterIP Service** — cache-blind round-robin (the "without
+     llm-d" arm).
+   - **vLLM GPU model servers** — `REPLICAS` pods **sharing one physical GPU** via
+     GKE GPU sharing.
+3. **Application**: a containerized FastAPI service that runs the comparison load
+   test, streams telemetry, and serves the UI.
 
 ---
 
 ## 📁 Repository Structure
 
 ```
-├── .env.example             # Template for configuration environment variables
+├── .env.example              # Template for configuration environment variables
 ├── app/
-│   ├── Dockerfile           # Multi-stage containerization for the FastAPI service
-│   ├── main.py              # FastAPI server handling prompt formatting & routing
-│   └── requirements.txt     # Python runtime dependencies
+│   ├── Dockerfile            # Containerization for the FastAPI service
+│   ├── main.py               # FastAPI: /generate, /api/loadtest, telemetry, status
+│   ├── loadtest_util.py      # Pure (unit-tested) load-test helpers
+│   ├── requirements.txt      # Python runtime dependencies
+│   └── static/               # UI (index.html, app.js)
 ├── infra/
-│   ├── cpu-deployment.yaml  # CPU vLLM model server (ComputeClass + KV events over ZMQ)
-│   ├── gpu-deployment.yaml  # GPU vLLM model server (nvidia.com/gpu, gpu-flex ComputeClass)
-│   ├── computeclass-cpu.yaml # CPU Custom Compute Class (e2 -> e4 -> n4, spot -> on-demand)
-│   ├── computeclass-gpu.yaml # GPU Custom Compute Class (G4 -> G2, spot -> on-demand; gpu blocks)
-│   ├── epp-config.yaml      # Vanilla EPP scorer weights (kept as rollback target)
-│   ├── llm-d-epp.yaml       # llm-d precise prefix-cache routing EPP (active; image pinned by digest)
-│   ├── inference-objective.yaml # Request priority/criticality (InferenceObjective)
-│   └── gateway.yaml         # External L7 Gateway definition
+│   ├── gpu-deployment.yaml   # vLLM model servers, REPLICAS pods sharing one GPU
+│   ├── computeclass-gpu.yaml # gpu-flex ComputeClass (G4→G2, spot→on-demand, gpuSharing)
+│   ├── gateway.yaml          # Internal L7 Gateway (gke-l7-rilb by default)
+│   ├── vllm-direct.yaml      # Plain ClusterIP Service — the "without llm-d" baseline
+│   ├── llm-d-epp.yaml        # llm-d precise prefix-cache routing EPP (active)
+│   ├── epp-config.yaml       # Vanilla EPP scorer weights (rollback target)
+│   └── inference-objective.yaml # Request priority/criticality
 ├── k8s/
-│   ├── app-deployment.yaml  # FastAPI application Deployment manifest
-│   └── app-service.yaml     # FastAPI external LoadBalancer Service
+│   ├── app-deployment.yaml   # FastAPI app Deployment (per-cluster image tag)
+│   ├── app-service.yaml      # FastAPI external LoadBalancer Service
+│   └── rbac.yaml             # ServiceAccount + pod/deployment read RBAC
 ├── tests/
-│   └── test_integration.py  # End-to-end automated testing suite
-├── setup_infra.sh           # Script to provision GKE, CRDs, and inference pools
-├── deploy_app.sh            # Script to build, push, and deploy the FastAPI container
-└── verify_setup.sh          # Post-deployment validation & integration testing launcher
+│   ├── test_loadtest_util.py # Unit tests (no cluster needed)
+│   └── test_integration.py   # End-to-end tests against a live app
+├── setup_infra.sh            # Provision GKE, CRDs, gateway, pools, EPP, baseline
+├── deploy_app.sh             # Build, push, and deploy the FastAPI container
+└── verify_setup.sh           # Post-deployment validation & test launcher
 ```
 
 ---
 
 ## 🚀 Getting Started
 
-### 1. Environment Configuration
-Create a `.env` file based on the provided template:
+### 1. Configure
 ```bash
 cp .env.example .env
 ```
-Edit `.env` to configure your specific GCP project, cluster name, zones, machine types, and model options.
+Edit `.env` for your project, cluster name, zone, model, and GPU-sharing settings
+(`REPLICAS`, `GPU_MEM_UTIL`, `GPU_SHARING_STRATEGY`, `GPU_MAX_SHARED`,
+`GATEWAY_CLASS`). Use a **distinct `CLUSTER_NAME`** so you never touch an existing
+cluster.
 
-### 2. Provision the GKE Cluster & Gateway API
-Execute the infrastructure setup script to provision your GKE cluster, enable Gateway API CRDs, and deploy the vLLM model servers:
+> **Prerequisite:** GPU sharing in a ComputeClass requires **GKE ≥
+> 1.35.2-gke.1485000**. On some recent GKE versions, GPU-sharing nodes have
+> advertised only `Allocatable nvidia.com/gpu: 1`; after the first GPU node is
+> created, confirm it advertises `GPU_MAX_SHARED` allocatable GPUs (else lower
+> `REPLICAS`).
+
+### 2. Provision infrastructure
 ```bash
 ./setup_infra.sh
 ```
+GPU-only. Portable/idempotent (macOS/Linux; `python3` for manifest substitution,
+auto-downloads `helm`, pins the GAIE CRDs, creates a proxy-only subnet if missing).
+It deploys the gateway, the `REPLICAS`-pod GPU deployment (one shared GPU), the
+InferencePool + vanilla EPP (rollback), the **llm-d EPP** (active), and the
+**`vllm-direct`** baseline Service.
 
-The script is idempotent and portable (macOS/Linux; uses `python3` for manifest
-substitution, downloads a matching `helm` if absent, pins the GAIE CRDs, and
-creates a proxy-only subnet if one is missing). Teardown flags for a clean rebuild:
+Teardown for a clean rebuild (the shared proxy-only subnet is never deleted):
 ```bash
-./setup_infra.sh --delete          # remove in-cluster resources (keep cluster, CRDs, subnet)
+./setup_infra.sh --delete          # remove in-cluster resources (keep cluster)
 ./setup_infra.sh --delete-cluster  # the above, plus delete the GKE cluster
 ```
-The shared proxy-only subnet is never deleted. A full reproducible cycle is
-`--delete-cluster` → `./setup_infra.sh` → `./deploy_app.sh` (the app image build
-needs Docker, so run `deploy_app.sh` where Docker is available).
 
-### Selectable CPU / GPU backend (two clusters)
-One backend per cluster, chosen by **`BACKEND=cpu|gpu`** in `.env`. The two stacks are
-identical except the model-server deployment, the Custom Compute Class, and the KV
-`BLOCK_SIZE` (CPU 128 / GPU 16). Both clusters use a ComputeClass with **spot → on-demand**
-fallback (GPU also **G4 → G2**); model servers run on the ComputeClass (spot) pool while the
-gateway/EPP/app stay on the on-demand default pool. Use a **distinct `CLUSTER_NAME` per
-backend** so existing clusters are never touched:
-
-```bash
-# GPU cluster
-BACKEND=gpu CLUSTER_NAME=gpu-flex-cluster ./setup_infra.sh && ./deploy_app.sh
-# CPU cluster
-BACKEND=cpu CLUSTER_NAME=cpu-flex-cluster ./setup_infra.sh && ./deploy_app.sh
-```
-
-The **UI shows which backend it is** (badge) and is **provisioning-aware**: while the
-model VM isn't up (cold provisioning, or a spot node reclaimed), it shows a "provisioning /
-re-provisioning…" banner via `/api/status` and keeps polling until Ready (Send is disabled
-meanwhile). If GPU capacity is unavailable after all fallback tiers, pods stay `Pending` and
-the UI simply keeps showing "provisioning".
-
-### 3. Build and Deploy the FastAPI Microservice
-Once the cluster and gateway are healthy, deploy the backend application:
+### 3. Build & deploy the app
 ```bash
 ./deploy_app.sh
 ```
+The app image uses a **per-cluster tag** (`IMAGE_TAG`, defaults to `CLUSTER_NAME`)
+so multiple clusters never clobber each other's image. Run this where Docker is
+available.
 
-### 4. Verify and Test
-Automatically discover the external LoadBalancer IP and validate the entire end-to-end generative AI workflow:
+### 4. Verify & test
 ```bash
 ./verify_setup.sh
 ```
+Discovers the app's external IP, waits for pods, and runs `tests/`.
 
 ---
 
-## 🔬 The Live Demo UI (real telemetry, not simulated)
+## 🔬 The Load-Test Comparison UI
 
-The FastAPI app serves an interactive UI that proves **KV-cache-aware routing** using real
-signals scraped from the vLLM pods — no faked numbers.
+The app serves a UI with two tabs.
 
-**What's real:**
-- **KV cache gauge** — scraped from `vllm:kv_cache_usage_perc` on each pod.
-- **Which pod served a request** — derived from the per-pod delta of
-  `vllm:prefix_cache_queries_total` around each request (`routing.served_by`).
-- **Cache hit vs. cold prefill** — from the delta of `vllm:prefix_cache_hits_total`
-  (`routing.cache_hit`, `routing.hit_ratio`).
-- **Time-to-First-Token** — measured from the streamed first token (`/generate` proxies
-  with `stream: true` and timestamps the first chunk).
-- **KV blocks held per pod + evictions (llm-d ground truth)** — the app subscribes to each
-  vLLM pod's KV-cache event stream over ZMQ (the same `BlockStored`/`BlockRemoved` events the
-  llm-d EPP indexes) and shows the real resident-block count per pod and flashes a real LRU
-  **eviction** when blocks are removed (the saturation/thrashing signal). Requires
-  `pyzmq`/`msgspec` (in `requirements.txt`); degrades gracefully if unavailable.
+### Load Test · llm-d vs round-robin (primary)
+Set **concurrency**, **documents**, **queries/doc**, **max tokens**, then **Run
+comparison**. The app fires `documents × queries/doc` requests per arm at the
+chosen concurrency — first through `vllm-direct` (round-robin), then through the
+llm-d gateway — each arm with its own fresh document nonce so neither benefits
+from the other's cache. Results show two columns plus a headline delta banner:
 
-**How the routing works (llm-d precise prefix-cache routing):** the active Endpoint Picker
-is the **llm-d endpoint-picker** (`infra/llm-d-epp.yaml`). vLLM publishes **KV-cache events**
-over ZMQ (`--kv-events-config`, port 5557 — see `infra/cpu-deployment.yaml`); the EPP's
-`precise-prefix-cache-producer` subscribes to every pod's socket and maintains a real,
-eviction-aware map of which prefix blocks live on which pod. Its `prefix-cache-scorer` then
-routes each request to the pod that *physically* holds the most of its prefix — ground truth,
-not a heuristic. A `token-producer` tokenizes prompts via vLLM's `/v1/completions/render`
-(through `vllm-model-svc`) so the EPP's block hashes match vLLM's.
+| Metric | How it's measured |
+|---|---|
+| **Prefix cache hit rate** | cluster-wide Δ`vllm:prefix_cache_hits_total` / Δ`vllm:prefix_cache_queries_total` over the run (robust under concurrency) |
+| **p50 / p95 TTFT** | from the first streamed token of each request |
+| **Throughput (tok/s)** | total completion tokens / wall-clock |
+| **Work per pod** | per-pod Δ`prefix_cache_queries_total` (llm-d concentrates a doc on one pod; round-robin spreads it) |
 
-Result: sending the same long context twice routes the follow-up to the **same pod** and
-returns a real cache hit (measured **~9.5s cold → ~0.6s warm TTFT**, affinity reliable).
+Endpoints: `POST /api/loadtest` (starts a run; inputs are clamped server-side),
+`GET /api/loadtest/status` (progress + per-mode results + headline comparison).
+
+### Playground · single request (secondary)
+The original cold→warm single-request demo: preset/editable contexts, a real TTFT
+graph, per-pod KV telemetry, and "New Run" (a fresh session prefix makes caches
+cold without restarting pods). Good for narrating one request; not for proving
+load.
+
+The header shows a **GPU backend badge** and a **provisioning banner** driven by
+`/api/status` (provisioning / re-provisioning on spot reclaim / degraded), gating
+actions until the shared GPU node is Ready.
+
+---
+
+## How the routing works (llm-d precise prefix-cache routing)
+
+The active Endpoint Picker is the **llm-d endpoint-picker** (`infra/llm-d-epp.yaml`).
+vLLM publishes **KV-cache events** over ZMQ (`--kv-events-config`, port 5557 — see
+`infra/gpu-deployment.yaml`); the EPP's `precise-prefix-cache-producer` subscribes
+to every pod's socket and maintains a real, eviction-aware map of which prefix
+blocks live on which pod. Its `prefix-cache-scorer` (weight 15 vs load scorers at
+1) routes each request to the pod that *physically* holds the most of its prefix.
+A `token-producer` tokenizes prompts via vLLM's `/v1/completions/render` (through
+`vllm-model-svc`) so the EPP's block hashes match vLLM's.
+
+> `BLOCK_SIZE` must match between vLLM `--block-size` and the EPP's
+> `tokenProcessorConfig.blockSize` (GPU default 16).
 
 **Two EPPs, instant rollback.** `setup_infra.sh` installs the vanilla
-gateway-api-inference-extension EPP (Step 6) and tunes its weights (Step 7,
-`infra/epp-config.yaml`, `prefix-cache-scorer` weight 10) as a heuristic fallback, then
-deploys the llm-d EPP and **flips the InferencePool's `endpointPickerRef`** to it (Step 8).
-To roll back to the heuristic EPP:
+gateway-api-inference-extension EPP (rollback target, `infra/epp-config.yaml`) and
+then flips the InferencePool's `endpointPickerRef` to the llm-d EPP. To roll back:
 ```bash
-kubectl patch inferencepool vllm-cpu-server --type merge \
-  -p '{"spec":{"endpointPickerRef":{"name":"vllm-cpu-server-epp"}}}'
+kubectl patch inferencepool vllm-server --type merge \
+  -p '{"spec":{"endpointPickerRef":{"name":"vllm-server-epp"}}}'
 ```
 
-> Note: this is the *precise prefix-cache routing* slice of llm-d, deployed as plain
-> manifests (no Helm). P/D disaggregation (GPU + RDMA/NIXL) is out of scope for this CPU demo.
+> Note: this is the *precise prefix-cache routing* slice of llm-d, deployed as
+> plain manifests (no Helm). P/D disaggregation (RDMA/NIXL) is out of scope.
 
-### Routing reliability (read this)
+---
 
-Prefix-cache routing is **probabilistic** — the same scoring approach GKE's official
-Inference Gateway uses. It is designed for many replicas with autoscaling; on **2 CPU
-pods with a presenter sending one request at a time** it is the hardest case, so affinity
-is strong-but-not-perfect. We maximize it by:
+## GPU sharing notes
 
-- **Long preset contexts (~450 tokens ≈ 3+ blocks)** so a repeat matches several full
-  blocks → a decisive prefix score. Short prompts (<128 tokens) cache nothing and route
-  by load — the single biggest cause of "it went to the wrong pod."
-- **`prefix-cache-scorer` weight 15** vs load scorers at 1 — prefix dominates unless a
-  pod is truly overloaded.
+- All `REPLICAS` pods share **one physical GPU** (`sharingStrategy: TIME_SHARING`,
+  `maxSharedClientsPerGPU >= REPLICAS`). Each requests `nvidia.com/gpu: 1` and
+  `--gpu-memory-utilization GPU_MEM_UTIL` (sum across pods < ~0.9).
+- `GPU_SHARING_STRATEGY=MPS` gives concurrent kernels (better throughput) but
+  needs `hostIPC: true` on the pod and gives no fault isolation.
+- Throughput is capped at ~one GPU, *not* `REPLICAS`×. The comparison is about
+  **efficiency per GPU-second**: round-robin wastes time-slices re-prefilling
+  cache misses; llm-d spends them serving tokens.
+- The `gpu-flex` ComputeClass falls back G4 (nvidia-rtx-pro-6000) → G2 (nvidia-l4),
+  spot → on-demand.
 
-Cache hit/miss and served-pod in the UI come from vLLM counter deltas; the app only
-reports them when one pod **clearly dominates** the window and a **meaningful fraction** of
-blocks were reused (avoids false "hit" labels under overlapping requests).
-
-**Latency:** the first response to a cold prefix is real CPU **prefill** (~10–20s) — vLLM
-only reports the request as "running" once prefill ends, so the gap between routing and the
-worker showing activity is expected. A warm cache hit returns in ~1–3s.
-
-> ⚠️ **Prefix caching is block-aligned (block size = 128 tokens).** Prompts shorter than one
-> block cache nothing and show no affinity. The UI's preset contexts are intentionally long
-> (~200+ tokens) and are sent as the shared *prefix* of the request.
-
-The `/generate` endpoint returns the OpenAI-style `choices`/`usage` plus `ttft_ms`,
-`total_ms`, and a `routing` object (`served_by`, `cache_hit`, `hit_ratio`, and a
-`confidence` of `exact`/`approximate`). It retries transient `503`/`429` (CPU prefill is
-slow, so concurrent requests can briefly saturate the backends).
-
-**Resetting between demo runs ("New Run"):** this vLLM build exposes no cache-reset
-endpoint, and restarting pods costs minutes of CPU warmup. Instead, the UI prepends a
-short **session tag** to every context. Because prefix caching hashes blocks in a chain
-from the first token, bumping the tag makes every context a brand-new (cold) prefix
-instantly — so you can re-run the cold→warm story without touching the pods. "New Run"
-also rebaselines the per-pod hit-rate gauges and clears the TTFT graph and log.
-
-> Note: per-pod hit-rate is shown **session-relative** (rebased on New Run). vLLM's raw
-> counters and `cached_tokens` are cumulative and only truly zero on a pod restart.
+**GPU latency:** the first request to a given pod/shape pays a one-time Triton JIT
+compile (~20s); steady-state TTFT is tens of milliseconds.

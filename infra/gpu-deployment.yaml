@@ -3,9 +3,13 @@ kind: Deployment
 metadata:
   name: vllm-server
 spec:
-  # If only one GPU schedules under capacity pressure, the app still reports Ready
-  # (readyReplicas >= 1); the second pod stays Pending and shows as provisioning.
-  replicas: 2
+  # All replicas SHARE one physical GPU via the gpu-flex ComputeClass GPU-sharing
+  # config (TIME_SHARING, maxSharedClientsPerGPU >= REPLICAS). The 1.5B model is
+  # tiny, so 4 pods fit on one RTX PRO 6000; each takes --gpu-memory-utilization
+  # GPU_MEM_UTIL (4 * 0.20 = 0.80 of 96 GB). If fewer pods schedule under capacity
+  # pressure the app still reports Ready (readyReplicas >= 1); the rest stay
+  # Pending and show as provisioning.
+  replicas: ${REPLICAS}
   selector:
     matchLabels:
       app: vllm-server
@@ -16,9 +20,10 @@ spec:
         inference.networking.k8s.io/engine-type: vllm
     spec:
       # GPU model servers run on the gpu-flex ComputeClass (G4 spot -> G4 on-demand
-      # -> G2 spot -> G2 on-demand). See infra/computeclass-gpu.yaml.
+      # -> G2 spot -> G2 on-demand), all sharing one GPU. See computeclass-gpu.yaml.
       # Driver version is set per-tier by the gpu-flex ComputeClass (G4 -> latest,
       # G2 -> default), so we don't pin it here.
+      # NOTE: GPU_SHARING_STRATEGY=MPS additionally requires `hostIPC: true` here.
       nodeSelector:
         cloud.google.com/compute-class: gpu-flex
       tolerations:
@@ -44,8 +49,10 @@ spec:
         # Block size must match the EPP's tokenProcessorConfig.blockSize (BLOCK_SIZE).
         - "--block-size"
         - "${BLOCK_SIZE}"
+        # Low per-pod fraction so REPLICAS pods fit on ONE shared GPU (under
+        # TIME_SHARING each pod sees the full GPU memory, so keep the sum < ~0.9).
         - "--gpu-memory-utilization"
-        - "0.90"
+        - "${GPU_MEM_UTIL}"
         # Publish KV-cache events over ZMQ for the llm-d precise prefix-cache indexer.
         - "--kv-events-config"
         - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","topic":"kv@$(POD_IP):5557@${MODEL_NAME}"}'

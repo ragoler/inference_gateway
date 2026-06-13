@@ -24,7 +24,7 @@
             <svg class="w-8 h-8 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
             </svg>
-            <h1 class="text-xl font-bold tracking-wide">GKE Inference Gateway Telemetry Playground</h1>
+            <h1 class="text-xl font-bold tracking-wide">GKE Inference Gateway &middot; llm-d</h1>
             <span id="backend-badge" class="text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full border border-slate-600 bg-slate-700 text-slate-300">Backend: …</span>
         </div>
         <div class="flex items-center space-x-2">
@@ -39,8 +39,68 @@
         <span id="provision-message" class="text-sm font-medium">Provisioning compute…</span>
     </div>
 
-    <!-- Main Grid -->
-    <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 p-6">
+    <!-- Tab navigation -->
+    <nav class="bg-slate-800 border-b border-slate-700 px-6 flex space-x-1">
+        <button id="tabbtn-loadtest" onclick="switchTab('loadtest')"
+            class="px-4 py-3 text-sm font-medium border-b-2 border-sky-400 text-sky-300">
+            Load Test &middot; llm-d vs round-robin
+        </button>
+        <button id="tabbtn-playground" onclick="switchTab('playground')"
+            class="px-4 py-3 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+            Playground &middot; single request
+        </button>
+    </nav>
+
+    <!-- ============================ LOAD TEST TAB ============================ -->
+    <main id="tab-loadtest" class="flex-1 p-6 space-y-6">
+        <!-- Controls -->
+        <section class="bg-slate-800 rounded-xl p-5 border border-slate-700">
+            <div class="flex items-start justify-between flex-wrap gap-4">
+                <div>
+                    <h2 class="text-lg font-semibold text-sky-400 mb-1">Comparison load test</h2>
+                    <p class="text-sm text-slate-400 max-w-2xl">
+                        Fires the <strong>same</strong> concurrent workload at both paths: through the
+                        <strong>llm-d</strong> gateway (cache-aware routing) and through a plain
+                        <strong>round-robin</strong> Service (cache-blind). Each document is queried
+                        several times — llm-d sends a document's repeats to the pod that already holds
+                        its prefix, so the shared GPU re-prefills far less.
+                    </p>
+                </div>
+                <button onclick="runLoadTest()" id="loadtest-run"
+                    class="bg-sky-500 hover:bg-sky-600 text-white font-medium py-3 px-6 rounded-lg transition shadow-lg shadow-sky-500/20 whitespace-nowrap">
+                    Run comparison
+                </button>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-5">
+                <label class="flex flex-col text-xs text-slate-400">Concurrency
+                    <input id="lt-concurrency" type="number" value="8" min="1" max="64"
+                        class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
+                <label class="flex flex-col text-xs text-slate-400">Documents
+                    <input id="lt-numdocs" type="number" value="8" min="1" max="64"
+                        class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
+                <label class="flex flex-col text-xs text-slate-400">Queries / doc
+                    <input id="lt-queries" type="number" value="4" min="1" max="32"
+                        class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
+                <label class="flex flex-col text-xs text-slate-400">Max tokens
+                    <input id="lt-maxtokens" type="number" value="16" min="1" max="256"
+                        class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
+            </div>
+            <p id="lt-progress" class="mt-4 text-sm font-mono text-slate-500">Idle. Set parameters and run a comparison.</p>
+        </section>
+
+        <!-- Headline comparison banner -->
+        <div id="lt-headline" class="hidden bg-gradient-to-r from-sky-500/10 to-emerald-500/10 border border-sky-500/40 rounded-xl p-5 text-center"></div>
+
+        <!-- Two-column results -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div id="lt-col-llmd"></div>
+            <div id="lt-col-direct"></div>
+        </div>
+    </main>
+
+    <!-- ============================ PLAYGROUND TAB ============================ -->
+    <main id="tab-playground" class="hidden flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 p-6">
         <!-- Left Column: Input Playground (5 cols) -->
         <section class="lg:col-span-5 bg-slate-800 rounded-xl p-5 border border-slate-700 flex flex-col space-y-5">
             <div>
@@ -114,7 +174,7 @@
                     <span class="text-sm font-medium text-white">GKE Inference Gateway + EPP</span>
                     <span id="routing-stream" class="text-xs px-3 py-1 rounded-full bg-slate-900 border border-slate-700 text-slate-400 font-mono transition-all">Idle</span>
                 </div>
-                <span class="text-[11px] text-slate-500 mt-1">prefix-cache-scorer (w3) &middot; queue-scorer (w2) &middot; kv-utilization-scorer (w2)</span>
+                <span class="text-[11px] text-slate-500 mt-1">prefix-cache-scorer (w15) &middot; kv-utilization-scorer (w1) &middot; queue-scorer (w1) &middot; no-hit-lru-scorer (w1)</span>
             </div>
 
             <!-- Physical Pod Dashboards -->

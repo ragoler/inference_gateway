@@ -15,7 +15,7 @@ spec:
       serviceAccountName: gateway-client-sa
       containers:
       - name: app
-        image: "${REGISTRY}/gateway-client-app:latest"
+        image: "${REGISTRY}/gateway-client-app:${IMAGE_TAG}"
         imagePullPolicy: Always
         ports:
         - containerPort: 8000

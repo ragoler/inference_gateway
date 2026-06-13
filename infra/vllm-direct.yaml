@@ -1,0 +1,22 @@
+# Plain ClusterIP Service over the vLLM pods — the "WITHOUT llm-d" baseline.
+#
+# This is cache-blind round-robin: kube-proxy load-balances each connection across
+# the model-server endpoints with no knowledge of which pod holds a prefix. The
+# load-test runner sends one arm of the comparison here (DIRECT_URL=http://vllm-direct)
+# and the other arm through the llm-d gateway, under an identical workload.
+#
+# Both paths are in-cluster (this ClusterIP vs the internal gke-l7-rilb gateway),
+# so the comparison is apples-to-apples.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-direct
+  namespace: default
+spec:
+  selector:
+    app: vllm-server
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8000
+    protocol: TCP
