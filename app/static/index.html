@@ -73,16 +73,48 @@
             </div>
 
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-5">
-                <label class="flex flex-col text-xs text-slate-400">Concurrency
+                <label class="flex flex-col text-xs text-slate-400">
+                    <span class="flex items-center">Concurrency
+                        <span class="relative group ml-1">
+                            <span class="w-4 h-4 inline-flex items-center justify-center rounded-full border border-slate-600 text-[9px] text-slate-400 cursor-help">?</span>
+                            <span class="invisible group-hover:visible opacity-0 group-hover:opacity-100 transition absolute z-20 bottom-full left-0 mb-2 w-64 bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-[11px] text-slate-300 leading-snug shadow-xl font-normal normal-case">
+                                Requests sent <strong>at the same time</strong>. Higher concurrency makes the pods queue and contend for the one shared GPU — which is exactly where cache-aware routing pays off: round-robin wastes GPU time re-prefilling misses, llm-d spends it serving tokens. Low concurrency hides the difference.
+                            </span>
+                        </span>
+                    </span>
                     <input id="lt-concurrency" type="number" value="8" min="1" max="64"
                         class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
-                <label class="flex flex-col text-xs text-slate-400">Documents
+                <label class="flex flex-col text-xs text-slate-400">
+                    <span class="flex items-center">Documents
+                        <span class="relative group ml-1">
+                            <span class="w-4 h-4 inline-flex items-center justify-center rounded-full border border-slate-600 text-[9px] text-slate-400 cursor-help">?</span>
+                            <span class="invisible group-hover:visible opacity-0 group-hover:opacity-100 transition absolute z-20 bottom-full left-0 mb-2 w-64 bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-[11px] text-slate-300 leading-snug shadow-xl font-normal normal-case">
+                                Number of <strong>distinct long documents</strong> (each a unique prefix), spread across the pods. With more documents than pods, each pod caches several. llm-d still sends every document's repeats to the pod that holds it; round-robin scatters them, so more documents = more chances to misroute.
+                            </span>
+                        </span>
+                    </span>
                     <input id="lt-numdocs" type="number" value="8" min="1" max="64"
                         class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
-                <label class="flex flex-col text-xs text-slate-400">Queries / doc
+                <label class="flex flex-col text-xs text-slate-400">
+                    <span class="flex items-center">Queries / doc
+                        <span class="relative group ml-1">
+                            <span class="w-4 h-4 inline-flex items-center justify-center rounded-full border border-slate-600 text-[9px] text-slate-400 cursor-help">?</span>
+                            <span class="invisible group-hover:visible opacity-0 group-hover:opacity-100 transition absolute z-20 bottom-full left-0 mb-2 w-64 bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-[11px] text-slate-300 leading-snug shadow-xl font-normal normal-case">
+                                How many times each document is queried (all sharing its long prefix). The first query prefills the prefix; the rest can be <strong>cache hits</strong>. Higher values mean more reuse to capture — they widen llm-d's lead and punish round-robin (it re-prefills on the wrong pod).
+                            </span>
+                        </span>
+                    </span>
                     <input id="lt-queries" type="number" value="4" min="1" max="32"
                         class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
-                <label class="flex flex-col text-xs text-slate-400">Max tokens
+                <label class="flex flex-col text-xs text-slate-400">
+                    <span class="flex items-center">Max tokens
+                        <span class="relative group ml-1">
+                            <span class="w-4 h-4 inline-flex items-center justify-center rounded-full border border-slate-600 text-[9px] text-slate-400 cursor-help">?</span>
+                            <span class="invisible group-hover:visible opacity-0 group-hover:opacity-100 transition absolute z-20 bottom-full right-0 mb-2 w-64 bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-[11px] text-slate-300 leading-snug shadow-xl font-normal normal-case">
+                                Output tokens generated per request (decode work). <strong>TTFT (first token) is mostly unaffected</strong> — that's set by prefill/routing. Larger values lengthen total time and shift the contrast toward the throughput (tok/s) numbers.
+                            </span>
+                        </span>
+                    </span>
                     <input id="lt-maxtokens" type="number" value="16" min="1" max="256"
                         class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
             </div>
