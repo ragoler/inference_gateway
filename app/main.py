@@ -9,7 +9,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import httpx
 
-from loadtest_util import make_documents, build_prompts, summarize, compare
+from loadtest_util import (
+    make_documents, build_prompts, order_prompts, summarize, compare, PATTERNS,
+)
 
 # Attempt to import kubernetes (only available when running in-cluster)
 try:
@@ -499,6 +501,9 @@ class LoadTestRequest(BaseModel):
     num_docs: int = 8
     queries_per_doc: int = 4
     max_tokens: int = 16
+    # Request dispatch order: grouped | shuffle | stagger | interleave (see
+    # loadtest_util.order_prompts). Lets the presenter pick the traffic shape.
+    pattern: str = "grouped"
 
 
 _loadtest = {
@@ -568,17 +573,26 @@ async def _one_request(http_client, base_url, prompt, max_tokens, sem) -> dict:
         return {"ok": ok, "ttft_ms": ttft_ms, "out_tokens": out_tokens}
 
 
-async def _run_mode(http_client, base_url, docs, p) -> dict:
-    """Run the full workload against one base_url and summarize it."""
+async def _run_mode(http_client, base_url, docs, p, seed) -> dict:
+    """Run the full workload against one base_url and summarize it.
+
+    Requests are dispatched in ordered *waves* (see order_prompts): most patterns
+    are a single wave; `stagger` is two (prime, then repeats). `seed` is shared by
+    both comparison arms so a shuffled order is identical for each — apples-to-apples.
+    """
     prompts = build_prompts(docs, p.queries_per_doc)
+    waves = order_prompts(prompts, p.pattern, seed=seed)
     sem = asyncio.Semaphore(max(1, p.concurrency))
 
     q0, h0, pod0 = await _sum_prefix_counters(http_client)
     t0 = time.perf_counter()
-    records = await asyncio.gather(
-        *[_one_request(http_client, base_url, prompt, p.max_tokens, sem)
-          for _doc_id, prompt in prompts]
-    )
+    records = []
+    for wave in waves:
+        wave_records = await asyncio.gather(
+            *[_one_request(http_client, base_url, prompt, p.max_tokens, sem)
+              for _doc_id, prompt in wave]
+        )
+        records.extend(wave_records)
     wall_s = time.perf_counter() - t0
     await asyncio.sleep(1.0)  # let cumulative counters settle after the burst
     q1, h1, pod1 = await _sum_prefix_counters(http_client)
@@ -590,21 +604,22 @@ async def _run_mode(http_client, base_url, docs, p) -> dict:
     return summarize(records, wall_s, hit_rate, pod_spread)
 
 
-async def _run_loadtest(p: LoadTestRequest, nonce: str):
+async def _run_loadtest(p: LoadTestRequest, nonce: str, seed: int):
     """Run both arms back-to-back with independent document sets."""
     global _loadtest
     gateway_url = f"http://{GATEWAY_IP}:80"
     try:
         async with httpx.AsyncClient() as http_client:
             # Direct (no llm-d) first, then llm-d — independent nonces so neither
-            # benefits from the other's warm cache.
+            # benefits from the other's warm cache. Same `seed` so a shuffled
+            # order is identical across arms (apples-to-apples).
             _loadtest["phase"] = "running:direct"
             direct_docs = make_documents(p.num_docs, f"d{nonce}")
-            _loadtest["direct"] = await _run_mode(http_client, DIRECT_URL, direct_docs, p)
+            _loadtest["direct"] = await _run_mode(http_client, DIRECT_URL, direct_docs, p, seed)
 
             _loadtest["phase"] = "running:llmd"
             llmd_docs = make_documents(p.num_docs, f"l{nonce}")
-            _loadtest["llmd"] = await _run_mode(http_client, gateway_url, llmd_docs, p)
+            _loadtest["llmd"] = await _run_mode(http_client, gateway_url, llmd_docs, p, seed)
 
             _loadtest["comparison"] = compare(_loadtest["llmd"], _loadtest["direct"])
             _loadtest["phase"] = "done"
@@ -628,14 +643,17 @@ async def start_loadtest(req: LoadTestRequest):
     req.num_docs = max(1, min(req.num_docs, 64))
     req.queries_per_doc = max(1, min(req.queries_per_doc, 32))
     req.max_tokens = max(1, min(req.max_tokens, 256))
+    if req.pattern not in PATTERNS:
+        req.pattern = "grouped"
 
     _loadtest_seq += 1
+    seed = _loadtest_seq
     nonce = f"{_loadtest_seq}{int(time.time()) % 100000}"
     _loadtest = {
         "running": True, "phase": "running:direct", "params": req.dict(),
         "direct": None, "llmd": None, "comparison": None, "error": None,
     }
-    asyncio.create_task(_run_loadtest(req, nonce))
+    asyncio.create_task(_run_loadtest(req, nonce, seed))
     total = req.num_docs * req.queries_per_doc
     return {"started": True, "requests_per_mode": total, "params": req.dict()}
 

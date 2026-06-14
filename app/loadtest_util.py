@@ -4,6 +4,8 @@ Deliberately dependency-free (stdlib only) so it can be unit-tested without
 FastAPI / httpx / kubernetes installed. main.py imports these; the async HTTP
 plumbing that actually drives the load lives there.
 """
+import random
+from collections import OrderedDict
 
 # Distinct topical documents so each one is a different prefix (the llm-d EPP
 # should route all queries about a given document to the same pod; round-robin
@@ -65,6 +67,54 @@ def build_prompts(docs, queries_per_doc):
             )
             prompts.append((d["id"], prompt))
     return prompts
+
+
+PATTERNS = ("grouped", "shuffle", "stagger", "interleave")
+
+
+def order_prompts(prompts, pattern, seed=0):
+    """Turn the grouped prompt list into ordered dispatch *waves*.
+
+    Returns a list of waves; each wave is a list of (doc_id, prompt). The runner
+    dispatches one wave at a time (awaiting it before the next), and within a wave
+    runs requests concurrently up to `concurrency`. Patterns:
+
+      grouped    — one wave, document order (all of a doc's queries adjacent).
+      shuffle    — one wave, whole list shuffled (mixed/realistic traffic).
+      interleave — one wave, round-robin across docs (doc0q1, doc1q1, … then q2…).
+      stagger    — TWO waves: first one priming query per doc (cold prefill),
+                   then all the repeats (guaranteed-warm cold→warm story).
+
+    `seed` makes shuffle reproducible and identical for both comparison arms, so
+    the comparison stays apples-to-apples.
+    """
+    items = list(prompts)
+    if pattern == "shuffle":
+        r = random.Random(seed)
+        r.shuffle(items)
+        return [items]
+
+    # Group preserving first-seen document order.
+    by_doc = OrderedDict()
+    for it in items:
+        by_doc.setdefault(it[0], []).append(it)
+
+    if pattern == "interleave":
+        out = []
+        maxq = max((len(v) for v in by_doc.values()), default=0)
+        for qi in range(maxq):
+            for q in by_doc.values():
+                if qi < len(q):
+                    out.append(q[qi])
+        return [out]
+
+    if pattern == "stagger":
+        primers = [q[0] for q in by_doc.values() if q]
+        rest = [it for q in by_doc.values() for it in q[1:]]
+        return [primers, rest] if rest else [primers]
+
+    # grouped (default): single wave, original document order.
+    return [items]
 
 
 def percentile(values, p):

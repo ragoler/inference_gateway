@@ -118,6 +118,29 @@
                     <input id="lt-maxtokens" type="number" value="16" min="1" max="256"
                         class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
             </div>
+
+            <div class="mt-4 flex items-center gap-2 flex-wrap">
+                <span class="flex items-center text-xs text-slate-400">Request order
+                    <span class="relative group ml-1">
+                        <span class="w-4 h-4 inline-flex items-center justify-center rounded-full border border-slate-600 text-[9px] text-slate-400 cursor-help">?</span>
+                        <span class="invisible group-hover:visible opacity-0 group-hover:opacity-100 transition absolute z-20 bottom-full left-0 mb-2 w-80 bg-slate-950 border border-slate-700 rounded-lg p-3 text-[11px] text-slate-300 leading-snug shadow-xl font-normal normal-case">
+                            The order requests are sent in. Both arms use the same order, so it stays apples-to-apples.
+                            <span class="block mt-2"><strong class="text-slate-100">Grouped</strong> — a document's queries are sent together (default).</span>
+                            <span class="block mt-1"><strong class="text-slate-100">Shuffled</strong> — whole list randomized; realistic mixed traffic, makes round-robin look worse.</span>
+                            <span class="block mt-1"><strong class="text-slate-100">Staggered</strong> — one priming query per doc first, then the repeats; cleanest cold→warm, gives llm-d its highest hit rate.</span>
+                            <span class="block mt-1"><strong class="text-slate-100">Interleaved</strong> — round-robin across docs (doc0·q1, doc1·q1, …); steady, even load.</span>
+                        </span>
+                    </span>
+                </span>
+                <select id="lt-pattern"
+                    class="bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-sky-400">
+                    <option value="grouped">Grouped by document (default)</option>
+                    <option value="shuffle">Shuffled — mixed traffic</option>
+                    <option value="stagger">Staggered — clean cold→warm</option>
+                    <option value="interleave">Interleaved — round-robin across docs</option>
+                </select>
+            </div>
+
             <p id="lt-progress" class="mt-4 text-sm font-mono text-slate-500">Idle. Set parameters and run a comparison.</p>
         </section>
 

@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
 from loadtest_util import (  # noqa: E402
-    make_documents, build_prompts, percentile, summarize, compare,
+    make_documents, build_prompts, order_prompts, percentile, summarize, compare,
 )
 
 
@@ -37,6 +37,57 @@ def test_build_prompts_shape():
     for doc_id, prompt in prompts:
         assert docs[doc_id]["text"] in prompt
         assert prompt.rstrip().endswith("Answer:")
+
+
+def _flat(waves):
+    return [it for w in waves for it in w]
+
+
+def test_order_grouped_default():
+    prompts = build_prompts(make_documents(3, "n"), 2)  # 6 prompts, doc-grouped
+    waves = order_prompts(prompts, "grouped")
+    assert len(waves) == 1
+    assert [d for d, _ in waves[0]] == [0, 0, 1, 1, 2, 2]
+
+
+def test_order_interleave_round_robins_docs():
+    prompts = build_prompts(make_documents(3, "n"), 2)
+    waves = order_prompts(prompts, "interleave")
+    assert len(waves) == 1
+    # First each doc's q1, then each doc's q2.
+    assert [d for d, _ in waves[0]] == [0, 1, 2, 0, 1, 2]
+
+
+def test_order_stagger_two_waves_prime_then_repeats():
+    prompts = build_prompts(make_documents(3, "n"), 3)
+    waves = order_prompts(prompts, "stagger")
+    assert len(waves) == 2
+    assert [d for d, _ in waves[0]] == [0, 1, 2]            # one primer per doc
+    assert sorted(d for d, _ in waves[1]) == [0, 0, 1, 1, 2, 2]  # the repeats
+    assert len(_flat(waves)) == 9
+
+
+def test_order_stagger_single_query_has_no_repeat_wave():
+    prompts = build_prompts(make_documents(3, "n"), 1)
+    waves = order_prompts(prompts, "stagger")
+    assert len(waves) == 1
+    assert len(waves[0]) == 3
+
+
+def test_order_shuffle_deterministic_per_seed_and_complete():
+    prompts = build_prompts(make_documents(4, "n"), 3)
+    a = order_prompts(prompts, "shuffle", seed=7)
+    b = order_prompts(prompts, "shuffle", seed=7)
+    c = order_prompts(prompts, "shuffle", seed=8)
+    assert a == b                      # same seed -> identical (apples-to-apples)
+    assert a != c                      # different seed -> different order
+    assert sorted(_flat(a)) == sorted(prompts)  # no requests dropped/added
+
+
+def test_order_preserves_request_count_all_patterns():
+    prompts = build_prompts(make_documents(5, "n"), 4)  # 20 prompts
+    for pat in ("grouped", "shuffle", "stagger", "interleave"):
+        assert len(_flat(order_prompts(prompts, pat))) == 20
 
 
 def test_percentile_basic():

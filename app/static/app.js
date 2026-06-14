@@ -78,6 +78,7 @@ async function runLoadTest() {
         num_docs: parseInt(document.getElementById("lt-numdocs").value, 10) || 8,
         queries_per_doc: parseInt(document.getElementById("lt-queries").value, 10) || 4,
         max_tokens: parseInt(document.getElementById("lt-maxtokens").value, 10) || 16,
+        pattern: document.getElementById("lt-pattern").value || "grouped",
     };
     setLtRunning(true);
     setLtProgress("Starting…");
