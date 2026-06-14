@@ -119,11 +119,17 @@ Discovers the app's external IP, waits for pods, and runs `tests/`.
 The app serves a UI with two tabs.
 
 ### Load Test · llm-d vs round-robin (primary)
-Set **concurrency**, **documents**, **queries/doc**, **max tokens**, then **Run
-comparison**. The app fires `documents × queries/doc` requests per arm at the
-chosen concurrency — first through `vllm-direct` (round-robin), then through the
-llm-d gateway — each arm with its own fresh document nonce so neither benefits
-from the other's cache. Results show two columns plus a headline delta banner:
+Set **concurrency**, **documents**, **queries/doc**, **max tokens**, and the
+**request order**, then **Run comparison**. The app fires `documents ×
+queries/doc` requests per arm at the chosen concurrency — first through
+`vllm-direct` (round-robin), then through the llm-d gateway — each arm with its
+own fresh document nonce so neither benefits from the other's cache. Results show
+two columns plus a headline delta banner.
+
+**Request order** (same for both arms, so it stays apples-to-apples):
+`grouped` (a doc's queries back-to-back), `shuffle` (randomized mixed traffic),
+`stagger` (prime each doc once, then send repeats — cleanest cold→warm, best-case
+llm-d hit rate), `interleave` (round-robin across docs). Metrics per arm:
 
 | Metric | How it's measured |
 |---|---|
@@ -180,7 +186,12 @@ kubectl patch inferencepool vllm-server --type merge \
   `maxSharedClientsPerGPU >= REPLICAS`). Each requests `nvidia.com/gpu: 1` and
   `--gpu-memory-utilization GPU_MEM_UTIL` (sum across pods < ~0.9).
 - `GPU_SHARING_STRATEGY=MPS` gives concurrent kernels (better throughput) but
-  needs `hostIPC: true` on the pod and gives no fault isolation.
+  gives no fault isolation. It's a one-flag switch: setup_infra.sh derives
+  `hostIPC: true` from it automatically. **Why it matters for the demo:**
+  TIME_SHARING gives each pod a fixed equal GPU slice, so llm-d concentrating
+  load on a cache-holding pod can leave other pods' slices idle — muddying the
+  result on small workloads. MPS lets a busy pod use idle GPU, so llm-d's cache
+  win shows more cleanly.
 - Throughput is capped at ~one GPU, *not* `REPLICAS`×. The comparison is about
   **efficiency per GPU-second**: round-robin wastes time-slices re-prefilling
   cache misses; llm-d spends them serving tokens.

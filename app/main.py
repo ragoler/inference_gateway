@@ -499,8 +499,8 @@ async def get_telemetry():
 class LoadTestRequest(BaseModel):
     concurrency: int = 8
     num_docs: int = 8
-    queries_per_doc: int = 4
-    max_tokens: int = 16
+    queries_per_doc: int = 6
+    max_tokens: int = 64
     # Request dispatch order: grouped | shuffle | stagger | interleave (see
     # loadtest_util.order_prompts). Lets the presenter pick the traffic shape.
     pattern: str = "grouped"
@@ -547,7 +547,7 @@ async def _one_request(http_client, base_url, prompt, max_tokens, sem) -> dict:
         ok = False
         try:
             async with http_client.stream(
-                "POST", f"{base_url}/v1/completions", json=payload, timeout=180.0
+                "POST", f"{base_url}/v1/completions", json=payload, timeout=90.0
             ) as resp:
                 if resp.status_code != 200:
                     await resp.aread()

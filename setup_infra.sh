@@ -60,7 +60,10 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.20}"
 GPU_SHARING_STRATEGY="${GPU_SHARING_STRATEGY:-TIME_SHARING}"
 GPU_MAX_SHARED="${GPU_MAX_SHARED:-4}"
 GATEWAY_CLASS="${GATEWAY_CLASS:-gke-l7-rilb}"
-export BACKEND BLOCK_SIZE REPLICAS GPU_MEM_UTIL GPU_SHARING_STRATEGY GPU_MAX_SHARED GATEWAY_CLASS
+# MPS needs hostIPC on the pod (concurrent kernels share the GPU more fluidly than
+# TIME_SHARING's fixed per-pod slices). Derived from the sharing strategy.
+if [ "$GPU_SHARING_STRATEGY" = "MPS" ]; then HOST_IPC="true"; else HOST_IPC="false"; fi
+export BACKEND BLOCK_SIZE REPLICAS GPU_MEM_UTIL GPU_SHARING_STRATEGY GPU_MAX_SHARED GATEWAY_CLASS HOST_IPC
 echo "GPU demo: ${REPLICAS} pods sharing 1 GPU (${GPU_SHARING_STRATEGY}, max ${GPU_MAX_SHARED}/GPU),"
 echo "  block_size=${BLOCK_SIZE}, gpu_mem_util=${GPU_MEM_UTIL}, gateway_class=${GATEWAY_CLASS}"
 if [ "${GPU_MAX_SHARED}" -lt "${REPLICAS}" ]; then

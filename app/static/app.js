@@ -48,8 +48,24 @@ document.addEventListener("DOMContentLoaded", () => {
     setInterval(pollStatus, 2500);
     renderTtftGraph();
     updateCtxTokens();
+    updatePatternHelp();
     pollLoadTest();   // restore any in-progress / last comparison on load
 });
+
+// Inline explanation under the request-order dropdown; updates as you choose.
+const PATTERN_HELP = {
+    grouped: "Grouped: a document's queries are sent back-to-back. Balanced baseline.",
+    shuffle: "Shuffled: all requests randomized into realistic mixed traffic. Round-robin scatters the cache most here, so llm-d's lead is widest under load (same random order for both arms).",
+    stagger: "Staggered: each document is primed once (cold), then its repeats are sent — guaranteed warm. Cleanest cold→warm story and the best-case llm-d hit rate. Recommended for a clear demo.",
+    interleave: "Interleaved: round-robin across documents (doc0·q1, doc1·q1, …). Steady, even load across all docs.",
+};
+
+function updatePatternHelp() {
+    const sel = document.getElementById("lt-pattern");
+    const el = document.getElementById("lt-pattern-help");
+    if (!sel || !el) return;
+    el.innerText = PATTERN_HELP[sel.value] || "";
+}
 
 // --------------------------------------------------------------------------
 // Tabs: Load Test (primary) vs Playground (secondary single-request demo)
@@ -108,14 +124,17 @@ async function pollLoadTest() {
         renderLoadTest(d);
         if (d.running) {
             setLtRunning(true);
-            const phase = d.phase === "running:direct" ? "Running round-robin (without llm-d)…"
-                        : d.phase === "running:llmd" ? "Running llm-d (cache-aware)…" : "Running…";
+            const pat = (d.params && d.params.pattern) ? d.params.pattern : "";
+            const tag = pat ? `[${pat}] ` : "";
+            const phase = d.phase === "running:direct" ? `Running ${tag}— round-robin (without llm-d)…`
+                        : d.phase === "running:llmd" ? `Running ${tag}— llm-d (cache-aware)…` : "Running…";
             setLtProgress(phase);
-            setTimeout(pollLoadTest, 2000);
+            setTimeout(pollLoadTest, 800);
         } else {
             loadtestPolling = false;
             setLtRunning(false);
-            if (d.phase === "done") setLtProgress("Comparison complete.");
+            const donePat = (d.params && d.params.pattern) ? ` (${d.params.pattern} order)` : "";
+            if (d.phase === "done") setLtProgress(`Comparison complete${donePat}.`);
             else if (d.phase === "error") setLtProgress(`Failed: ${d.error || "unknown error"}`, true);
         }
     } catch (err) {

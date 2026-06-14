@@ -23,7 +23,9 @@ spec:
       # -> G2 spot -> G2 on-demand), all sharing one GPU. See computeclass-gpu.yaml.
       # Driver version is set per-tier by the gpu-flex ComputeClass (G4 -> latest,
       # G2 -> default), so we don't pin it here.
-      # NOTE: GPU_SHARING_STRATEGY=MPS additionally requires `hostIPC: true` here.
+      # MPS requires hostIPC: true; TIME_SHARING does not. setup_infra.sh sets
+      # HOST_IPC from GPU_SHARING_STRATEGY (true for MPS, false otherwise).
+      hostIPC: ${HOST_IPC}
       nodeSelector:
         cloud.google.com/compute-class: gpu-flex
       tolerations:

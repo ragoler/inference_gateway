@@ -104,7 +104,7 @@
                             </span>
                         </span>
                     </span>
-                    <input id="lt-queries" type="number" value="4" min="1" max="32"
+                    <input id="lt-queries" type="number" value="6" min="1" max="32"
                         class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
                 <label class="flex flex-col text-xs text-slate-400">
                     <span class="flex items-center">Max tokens
@@ -115,7 +115,7 @@
                             </span>
                         </span>
                     </span>
-                    <input id="lt-maxtokens" type="number" value="16" min="1" max="256"
+                    <input id="lt-maxtokens" type="number" value="64" min="1" max="256"
                         class="mt-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:outline-none focus:border-sky-400"></label>
             </div>
 
@@ -132,7 +132,7 @@
                         </span>
                     </span>
                 </span>
-                <select id="lt-pattern"
+                <select id="lt-pattern" onchange="updatePatternHelp()"
                     class="bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-sky-400">
                     <option value="grouped">Grouped by document (default)</option>
                     <option value="shuffle">Shuffled — mixed traffic</option>
@@ -140,6 +140,7 @@
                     <option value="interleave">Interleaved — round-robin across docs</option>
                 </select>
             </div>
+            <p id="lt-pattern-help" class="mt-2 text-[11px] text-slate-500 leading-snug"></p>
 
             <p id="lt-progress" class="mt-4 text-sm font-mono text-slate-500">Idle. Set parameters and run a comparison.</p>
         </section>
