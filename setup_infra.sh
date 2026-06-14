@@ -70,17 +70,6 @@ if [ "${GPU_MAX_SHARED}" -lt "${REPLICAS}" ]; then
   echo "Error: GPU_MAX_SHARED (${GPU_MAX_SHARED}) must be >= REPLICAS (${REPLICAS})."; exit 1
 fi
 
-# Check and install helm locally if needed (OS/arch-aware download).
-if ! command -v helm &> /dev/null; then
-  echo "helm not found. Installing locally to ./bin..."
-  mkdir -p bin
-  HELM_OS=$(uname -s | tr '[:upper:]' '[:lower:]')          # darwin | linux
-  HELM_ARCH=$(uname -m); case "$HELM_ARCH" in x86_64) HELM_ARCH=amd64;; arm64|aarch64) HELM_ARCH=arm64;; esac
-  curl -fsSL "https://get.helm.sh/helm-v3.15.1-${HELM_OS}-${HELM_ARCH}.tar.gz" \
-    | tar -xz -C bin --strip-components=1 "${HELM_OS}-${HELM_ARCH}/helm"
-  export PATH="$PWD/bin:$PATH"
-fi
-
 teardown_resources() {
   if ! gcloud container clusters describe "${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
     echo "Cluster ${CLUSTER_NAME} does not exist; nothing to tear down."
@@ -92,7 +81,9 @@ teardown_resources() {
   kubectl delete -f infra/inference-objective.yaml --ignore-not-found || true
   render infra/llm-d-epp.yaml | kubectl delete -f - --ignore-not-found || true
   kubectl delete -f infra/vllm-direct.yaml --ignore-not-found || true
-  helm uninstall "${INFERENCE_POOL_NAME}" || true
+  render infra/http-route.yaml | kubectl delete -f - --ignore-not-found || true
+  kubectl delete -f infra/inferencepool.yaml --ignore-not-found || true
+  kubectl delete -f infra/epp-rbac.yaml --ignore-not-found || true
   render "${MODEL_DEPLOYMENT}" | kubectl delete -f - --ignore-not-found || true
   render infra/gateway.yaml | kubectl delete -f - --ignore-not-found || true
   render "${COMPUTE_CLASS_FILE}" | kubectl delete -f - --ignore-not-found || true
@@ -168,49 +159,25 @@ render "${MODEL_DEPLOYMENT}" | kubectl apply -f -
 echo "=== Step 5b: Applying vllm-direct Service (the 'without llm-d' round-robin baseline) ==="
 kubectl apply -f infra/vllm-direct.yaml
 
-echo "=== Step 6: Deploying InferencePool and EPP using Helm ==="
+echo "=== Step 6: Deploying InferencePool + EPP RBAC + HTTPRoute (plain manifests, no Helm) ==="
 export INFERENCE_POOL_NAME=vllm-server
-export GATEWAY_PROVIDER=gke
-export MODEL_SERVER=vllm
-export MODEL_SERVER_PROTOCOL=http
-export IGW_CHART_VERSION=v0
+# EPP ServiceAccount + RBAC the llm-d EPP runs as.
+kubectl apply -f infra/epp-rbac.yaml
+# InferencePool (endpointPickerRef already points at the llm-d EPP) + GKE policies.
+kubectl apply -f infra/inferencepool.yaml
+# HTTPRoute attaching ${GATEWAY_NAME} to the InferencePool (parentRef baked in; no patch).
+render infra/http-route.yaml | kubectl apply -f -
 
-helm upgrade --install ${INFERENCE_POOL_NAME} \
- --set inferencePool.modelServers.matchLabels.app=${INFERENCE_POOL_NAME} \
- --set provider.name=${GATEWAY_PROVIDER} \
- --set inferencePool.modelServerType=${MODEL_SERVER} \
- --set inferencePool.modelServerProtocol=${MODEL_SERVER_PROTOCOL} \
- --set experimentalHttpRoute.enabled=true \
- --version ${IGW_CHART_VERSION} \
- oci://us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/charts/inferencepool
-
-echo "=== Step 6b: Attaching the HTTPRoute to gateway ${GATEWAY_NAME} ==="
-# The chart's experimentalHttpRoute hardcodes parentRef name "inference-gateway";
-# repoint it at our actual gateway so a custom GATEWAY_NAME works (otherwise the
-# route attaches to a non-existent gateway and the gateway returns 404).
-kubectl patch httproute ${INFERENCE_POOL_NAME} --type merge \
-  -p "{\"spec\":{\"parentRefs\":[{\"group\":\"gateway.networking.k8s.io\",\"kind\":\"Gateway\",\"name\":\"${GATEWAY_NAME}\"}]}}"
-
-echo "=== Step 7: Tuning the vanilla EPP scorer weights (rollback target) ==="
-# Tune the Helm-installed EPP's prefix-cache weight. This EPP is kept as a fast
-# rollback target; the llm-d EPP in Step 8 becomes the active Endpoint Picker.
-export INFERENCE_POOL_NAME
-render infra/epp-config.yaml | kubectl apply -f -
-kubectl rollout restart deployment/${INFERENCE_POOL_NAME}-epp
-kubectl rollout status deployment/${INFERENCE_POOL_NAME}-epp --timeout=120s
-
-echo "=== Step 8: Deploying llm-d precise prefix-cache routing EPP ==="
-# Event-driven precise prefix-cache routing: this EPP consumes vLLM's KV-cache
-# events over ZMQ (enabled in the model-server deployment) and routes each request
-# to the pod that physically holds the most of its prefix. It becomes the active
-# Endpoint Picker; flip endpointPickerRef back to ${INFERENCE_POOL_NAME}-epp to roll back.
+echo "=== Step 7: Deploying llm-d precise prefix-cache routing EPP ==="
+# Event-driven precise prefix-cache routing: this EPP consumes vLLM's KV-cache events
+# over ZMQ (enabled in the model-server deployment) and routes each request to the pod
+# that physically holds the most of its prefix. It is the InferencePool's endpointPicker
+# (set declaratively in infra/inferencepool.yaml — no kubectl patch).
 export MODEL_NAME BLOCK_SIZE
 render infra/llm-d-epp.yaml | kubectl apply -f -
 kubectl rollout status deployment/vllm-server-epp-llmd --timeout=180s
-kubectl patch inferencepool ${INFERENCE_POOL_NAME} --type merge \
-  -p '{"spec":{"endpointPickerRef":{"name":"vllm-server-epp-llmd"}}}'
 
-echo "=== Step 9: Declaring InferenceObjectives (request priority / criticality) ==="
+echo "=== Step 8: Declaring InferenceObjectives (request priority / criticality) ==="
 kubectl apply -f infra/inference-objective.yaml
 
 echo "=== Setup Complete ==="

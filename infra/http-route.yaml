@@ -1,0 +1,22 @@
+# HTTPRoute attaching the gateway to the InferencePool — hand-rolled equivalent of the
+# chart's experimentalHttpRoute (chart removed; Helm-free). parentRef targets our actual
+# ${GATEWAY_NAME} directly, so no post-install kubectl patch is needed.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vllm-server
+  namespace: default
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: ${GATEWAY_NAME}
+  rules:
+  - backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: vllm-server
+    matches:
+    - path:
+        type: PathPrefix
+        value: /

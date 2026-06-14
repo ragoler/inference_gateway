@@ -1,0 +1,58 @@
+# InferencePool + GKE policies — hand-rolled equivalent of the gateway-api-inference-
+# extension Helm chart's output (chart removed; this repo is Helm-free).
+# Derived from config/charts/inferencepool/templates/{inferencepool,gke}.yaml @ v1.5.0
+# with the values setup_infra.sh used (modelServers app=vllm-server, protocol=http,
+# provider=gke). endpointPickerRef points directly at the llm-d EPP (infra/llm-d-epp.yaml),
+# so no post-install kubectl patch is needed.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: vllm-server
+  namespace: default
+spec:
+  targetPorts:
+    - number: 8000
+  appProtocol: "http"
+  selector:
+    matchLabels:
+      app: "vllm-server"
+  endpointPickerRef:
+    name: vllm-server-epp-llmd
+    port:
+      number: 9002
+    failureMode: FailOpen
+---
+# Faster health checks than the GKE default for quick EPP switchover.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: vllm-server
+  namespace: default
+spec:
+  targetRef:
+    group: inference.networking.k8s.io
+    kind: InferencePool
+    name: vllm-server
+  default:
+    timeoutSec: 2
+    checkIntervalSec: 2
+    config:
+      type: HTTP
+      httpHealthCheck:
+        requestPath: /health
+        port: 8000
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: vllm-server
+  namespace: default
+spec:
+  targetRef:
+    group: inference.networking.k8s.io
+    kind: InferencePool
+    name: vllm-server
+  default:
+    timeoutSec: 300
+    logging:
+      enabled: true

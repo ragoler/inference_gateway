@@ -87,10 +87,11 @@ cluster.
 ./setup_infra.sh
 ```
 GPU-only. Portable/idempotent (macOS/Linux; `python3` for manifest substitution,
-auto-downloads `helm`, pins the GAIE CRDs, creates a proxy-only subnet if missing).
-It deploys the gateway, the `REPLICAS`-pod GPU deployment (one shared GPU), the
-InferencePool + vanilla EPP (rollback), the **llm-d EPP** (active), and the
-**`vllm-direct`** baseline Service.
+pins the GAIE CRDs, creates a proxy-only subnet if missing). **No Helm** — the
+InferencePool, EPP RBAC, and HTTPRoute are plain manifests (`infra/inferencepool.yaml`,
+`infra/epp-rbac.yaml`, `infra/http-route.yaml`). It deploys the gateway, the
+`REPLICAS`-pod GPU deployment (one shared GPU), the InferencePool, the **llm-d EPP**
+(active endpoint picker), and the **`vllm-direct`** baseline Service.
 
 Teardown for a clean rebuild (the shared proxy-only subnet is never deleted):
 ```bash

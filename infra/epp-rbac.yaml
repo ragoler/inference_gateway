@@ -1,0 +1,103 @@
+# Endpoint Picker (EPP) ServiceAccount + RBAC — hand-rolled equivalent of the
+# gateway-api-inference-extension Helm chart's RBAC (chart removed; Helm-free).
+# The llm-d EPP (infra/llm-d-epp.yaml) runs as this ServiceAccount.
+#
+# The namespaced Role mirrors the chart's rbac.yaml exactly. The ClusterRole grants
+# the endpoint-discovery + auth-delegation perms the EPP needs (pods/endpointslices
+# read, inferencepool/objective read, token/access reviews). If the EPP logs an RBAC
+# "forbidden" on first run, add the missing rule here — this is the piece most likely
+# to need a tweak after live validation.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-server-epp
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vllm-server-epp-non-sa
+  namespace: default
+rules:
+- apiGroups: ["inference.networking.x-k8s.io"]
+  resources: ["inferenceobjectives", "inferencemodelrewrites"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: ["inference.networking.k8s.io"]
+  resources: ["inferencepools"]
+  verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vllm-server-epp-non-sa
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: vllm-server-epp
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vllm-server-epp-non-sa
+---
+# Leader election for the EPP's controller-runtime manager.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vllm-server-epp-leader-election
+  namespace: default
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vllm-server-epp-leader-election
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: vllm-server-epp
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vllm-server-epp-leader-election
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vllm-server-epp
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["inference.networking.k8s.io"]
+  resources: ["inferencepools"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["inference.networking.x-k8s.io"]
+  resources: ["inferenceobjectives"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+- apiGroups: ["authorization.k8s.io"]
+  resources: ["subjectaccessreviews"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vllm-server-epp
+subjects:
+- kind: ServiceAccount
+  name: vllm-server-epp
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vllm-server-epp
