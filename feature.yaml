@@ -1,0 +1,76 @@
+# GKE Showcase Hub feature descriptor for the inference_gateway demo.
+# Contract reference: gke_all/feature.md.
+#
+# Integration model: LINK-OUT (decentralized). The Hub shows a card, deploys/tears the
+# feature down, and "Open Showcase" links straight to this app's own UI (its LoadBalancer
+# Service). The Hub does NOT proxy or re-host the UI — the browser talks to the feature
+# directly. This repo still also deploys fully standalone via setup_infra.sh/deploy_app.sh
+# (unchanged).
+#
+# Additive, standalone preserved:
+#   * Manifests apply from the existing dirs as-is (infra_dirs: [infra, k8s]); the
+#     cluster-scoped ComputeClass in infra/ is routed to the cluster API by the Hub.
+#   * app/main.py resolves the Gateway address at runtime when GATEWAY_IP is unset
+#     (Hub path); standalone still injects it via deploy_app.sh (env wins).
+#   * The image ref ${REGISTRY}/gateway-client-app:${IMAGE_TAG} is unchanged; the Hub
+#     composes REGISTRY from its own vars via template_defaults (fixed-point expansion).
+#
+# Remaining before a working Hub deploy (validate on a GPU cluster) — all one-time
+# CLUSTER setup, not per-feature Hub plumbing:
+#   * Cluster prereqs the standalone setup_infra.sh installs once: the
+#     gateway-api-inference-extension CRDs (kubectl apply -k) and the InferencePool Helm
+#     release. Run these as part of cluster bootstrap before deploying this feature.
+
+name: inference-gateway
+title: GKE Inference Gateway (llm-d)
+description: >-
+  Prove llm-d cache-aware routing on a shared GPU: run the same concurrent workload
+  through the Inference Gateway (EPP prefix-cache routing) vs a cache-blind round-robin
+  Service, and compare TTFT, throughput, and prefix-cache hit rate side by side.
+gke_features:
+  - InferencePool & Endpoint Picker (EPP)
+  - Prefix-Cache Aware Routing
+  - GPU Time-Sharing (4 pods / 1 GPU)
+  - Internal Gateway (gke-l7-rilb)
+
+paths:
+  # Apply both existing manifest dirs as-is (no restructuring).
+  infra_dirs: [infra, k8s]
+
+# Link-out: the Hub links "Open Showcase" to this Service's own external address.
+# No playroom_slug / hub_router — the feature serves its own UI and API.
+entrypoint_service: gateway-client-app-svc
+
+deployment_name: gateway-client-app
+gateway:
+  name: inference-gw-gpu
+  class: gke-l7-rilb
+
+build:
+  - image: gateway-client-app
+    context: app
+    dockerfile: app/Dockerfile
+
+template_vars:
+  - NAMESPACE
+  - PROJECT_NAME
+  - REGION
+  - ARTIFACT_REGISTRY_REPO
+
+# Values for the demo's own variables that the Hub does not supply (from .env.example).
+template_defaults:
+  GATEWAY_NAME: inference-gw-gpu
+  GATEWAY_CLASS: gke-l7-rilb
+  MODEL_NAME: Qwen/Qwen2.5-1.5B-Instruct
+  BACKEND: gpu
+  REPLICAS: "4"
+  GPU_MEM_UTIL: "0.20"
+  GPU_SHARING_STRATEGY: TIME_SHARING
+  GPU_MAX_SHARED: "4"
+  BLOCK_SIZE: "16"
+  GPU_ACCELERATOR_TYPE: nvidia-rtx-pro-6000
+  GPU_ACCELERATOR_TYPE_FALLBACK: nvidia-l4
+  MAX_GPU: "8"
+  APP_PORT: "8000"
+  REGISTRY: "${REGION}-docker.pkg.dev/${PROJECT_NAME}/${ARTIFACT_REGISTRY_REPO}"
+  IMAGE_TAG: latest

@@ -35,6 +35,7 @@ except Exception:
 app = FastAPI(title="Inference Gateway Client API")
 
 GATEWAY_IP = os.getenv("GATEWAY_IP")
+GATEWAY_NAME = os.getenv("GATEWAY_NAME", "inference-gw-gpu")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct")
 NAMESPACE = os.getenv("POD_NAMESPACE", "default")
 POD_SELECTOR = os.getenv("POD_SELECTOR", "app=vllm-server")
@@ -53,6 +54,41 @@ _was_ready = False
 # Number of /generate calls currently in their measured window. Used to flag
 # when per-pod metric-delta attribution is unreliable (overlapping requests).
 _active_generates = 0
+
+_resolved_gateway_ip = None
+
+
+def get_gateway_ip():
+    """Resolve the inference Gateway address (env-first, in-cluster fallback).
+
+    Standalone: setup_infra.sh injects the real GATEWAY_IP env var, which is used
+    verbatim (behavior unchanged). When deployed through the GKE Showcase Hub the env
+    var is absent (or left as an unexpanded ``${GATEWAY_IP}`` placeholder), so we resolve
+    the Gateway's programmed address from the K8s API and cache it. Returns None if it
+    cannot be determined yet (caller surfaces a clear 500).
+    """
+    global _resolved_gateway_ip
+    if GATEWAY_IP and not GATEWAY_IP.startswith("${"):
+        return GATEWAY_IP
+    if _resolved_gateway_ip:
+        return _resolved_gateway_ip
+    if not K8S_AVAILABLE:
+        return None
+    try:
+        gw = client.CustomObjectsApi().get_namespaced_custom_object(
+            group="gateway.networking.k8s.io",
+            version="v1",
+            namespace=NAMESPACE,
+            plural="gateways",
+            name=GATEWAY_NAME,
+        )
+        addresses = gw.get("status", {}).get("addresses", [])
+        if addresses:
+            _resolved_gateway_ip = addresses[0].get("value")
+            return _resolved_gateway_ip
+    except Exception:
+        return None
+    return None
 
 
 class GenerateRequest(BaseModel):
@@ -277,10 +313,11 @@ def compute_routing(before: dict, after: dict) -> dict:
 
 @app.post("/generate")
 async def generate_text(request: GenerateRequest):
-    if not GATEWAY_IP:
-        raise HTTPException(status_code=500, detail="GATEWAY_IP environment variable not set")
+    gw = get_gateway_ip()
+    if not gw:
+        raise HTTPException(status_code=500, detail="Gateway address unavailable: set GATEWAY_IP or ensure the in-cluster Gateway is programmed")
 
-    url = f"http://{GATEWAY_IP}:80/v1/completions"
+    url = f"http://{gw}:80/v1/completions"
     payload = {
         "model": MODEL_NAME,
         "prompt": request.prompt,
@@ -386,7 +423,7 @@ async def generate_text(request: GenerateRequest):
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "backend": BACKEND,
-            "gateway_ip_configured": bool(GATEWAY_IP), "k8s_available": K8S_AVAILABLE}
+            "gateway_ip_configured": bool(get_gateway_ip()), "k8s_available": K8S_AVAILABLE}
 
 
 def _model_status():
@@ -607,7 +644,7 @@ async def _run_mode(http_client, base_url, docs, p, seed) -> dict:
 async def _run_loadtest(p: LoadTestRequest, nonce: str, seed: int):
     """Run both arms back-to-back with independent document sets."""
     global _loadtest
-    gateway_url = f"http://{GATEWAY_IP}:80"
+    gateway_url = f"http://{get_gateway_ip()}:80"
     try:
         async with httpx.AsyncClient() as http_client:
             # Direct (no llm-d) first, then llm-d — independent nonces so neither
@@ -634,8 +671,8 @@ async def _run_loadtest(p: LoadTestRequest, nonce: str, seed: int):
 async def start_loadtest(req: LoadTestRequest):
     """Kick off a comparison run in the background; poll /api/loadtest/status."""
     global _loadtest, _loadtest_seq
-    if not GATEWAY_IP:
-        raise HTTPException(status_code=500, detail="GATEWAY_IP not set")
+    if not get_gateway_ip():
+        raise HTTPException(status_code=500, detail="Gateway address unavailable: set GATEWAY_IP or ensure the in-cluster Gateway is programmed")
     if _loadtest["running"]:
         raise HTTPException(status_code=409, detail="A load test is already running.")
     # Clamp inputs so a stray UI value can't launch thousands of requests.
