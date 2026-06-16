@@ -159,15 +159,40 @@ function setLtProgress(msg, isError = false) {
 }
 
 function renderLoadTest(d) {
+    const q = (d.params && d.params.queries_per_doc) ? d.params.queries_per_doc : null;
+    // Context notes shown under each hit-rate number to explain WHY it is what it
+    // is — the hit rate is vLLM's own (model-server) prefix cache, so round-robin
+    // still gets accidental hits when a doc's queries coincidentally co-locate.
+    let directNote = null, llmdNote = null;
+    if (q) {
+        const pods = d.direct ? (Object.keys(d.direct.pod_spread || {}).length || latestNodes.length)
+                              : (latestNodes.length || 4);
+        const base = expectedRoundRobinHit(q, pods);
+        if (base != null) {
+            directNote = `≈${Math.round(base * 100)}% expected from coincidental co-location (${q} queries across ${pods} pods)`;
+        }
+        // Ideal if every doc's queries land on one pod: 1 cold + (q-1) warm.
+        llmdNote = `≈${Math.round(((q - 1) / q) * 100)}% ideal if perfectly co-located (1 cold + ${q - 1} warm)`;
+    }
     document.getElementById("lt-col-llmd").innerHTML =
-        ltColumn("With llm-d", "cache-aware routing", d.llmd, "sky", d.running && d.phase === "running:llmd");
+        ltColumn("With llm-d", "cache-aware routing", d.llmd, "sky", d.running && d.phase === "running:llmd", llmdNote);
     document.getElementById("lt-col-direct").innerHTML =
-        ltColumn("Without llm-d", "round-robin Service", d.direct, "slate", d.running && d.phase === "running:direct");
+        ltColumn("Without llm-d", "round-robin Service", d.direct, "slate", d.running && d.phase === "running:direct", directNote);
     renderLtHeadline(d);
 }
 
+// Expected vLLM prefix-cache hit rate from PURELY coincidental co-location when q
+// queries sharing one prefix are spread randomly over `pods` replicas (each pod's
+// first query is a cold miss): hits = q - pods*(1-(1-1/pods)^q).
+function expectedRoundRobinHit(q, pods) {
+    if (!q || !pods || pods < 1) return null;
+    const misses = pods * (1 - Math.pow(1 - 1 / pods, q));
+    return Math.max(0, (q - misses) / q);
+}
+
 // Render one result column. metrics may be null (not run yet / in progress).
-function ltColumn(title, subtitle, m, accent, active) {
+// `note` is a small caption shown under the hit-rate number (may be null).
+function ltColumn(title, subtitle, m, accent, active, note) {
     const accentText = accent === "sky" ? "text-sky-400" : "text-slate-300";
     const accentBar = accent === "sky" ? "bg-sky-400" : "bg-slate-400";
     if (!m) {
@@ -198,7 +223,9 @@ function ltColumn(title, subtitle, m, accent, active) {
 
         <div class="text-center mb-4">
             <div class="text-5xl font-bold ${accentText}">${hitPct}%</div>
-            <div class="text-xs text-slate-500 uppercase tracking-wider">prefix cache hit rate</div>
+            <div class="text-xs text-slate-500 uppercase tracking-wider">vLLM prefix-cache hit rate</div>
+            <div class="text-[10px] text-slate-600">measured at the model-server layer</div>
+            ${note ? `<div class="text-[10px] text-slate-500 mt-1 px-2 leading-snug">${note}</div>` : ""}
         </div>
 
         <div class="grid grid-cols-2 gap-3 text-sm">
