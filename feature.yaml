@@ -71,6 +71,9 @@ template_defaults:
   REPLICAS: "4"
   GPU_MEM_UTIL: "0.20"
   GPU_SHARING_STRATEGY: TIME_SHARING
+  # hostIPC is only needed for MPS; TIME_SHARING (the default above) -> false. If you switch
+  # GPU_SHARING_STRATEGY to MPS, set this to "true".
+  HOST_IPC: "false"
   GPU_MAX_SHARED: "4"
   BLOCK_SIZE: "16"
   GPU_ACCELERATOR_TYPE: nvidia-rtx-pro-6000
@@ -79,3 +82,6 @@ template_defaults:
   APP_PORT: "8000"
   REGISTRY: "${REGION}-docker.pkg.dev/${PROJECT_NAME}/${ARTIFACT_REGISTRY_REPO}"
   IMAGE_TAG: latest
+  # Empty under the Hub: app/main.py resolves the Gateway address at runtime via the K8s API
+  # (the client app's RBAC grants this). Standalone deploy_app.sh injects a real IP (env wins).
+  GATEWAY_IP: ""
