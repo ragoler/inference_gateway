@@ -36,6 +36,11 @@ gke_features:
 paths:
   # Apply both existing manifest dirs as-is (no restructuring).
   infra_dirs: [infra, k8s]
+  # Once-per-cluster prerequisites applied at Hub bootstrap (build_infra.sh), before any
+  # per-namespace deploy. cluster/kustomization.yaml installs the upstream
+  # gateway-api-inference-extension CRDs (InferenceObjective lives in inference.networking.x-k8s.io;
+  # GKE provides the InferencePool CRD natively). Applied with `kubectl apply -k`.
+  cluster_dir: cluster
 
 # Link-out: the Hub links "Open Showcase" to this Service's own external address.
 # No playroom_slug / hub_router — the feature serves its own UI and API.
