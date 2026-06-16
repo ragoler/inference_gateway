@@ -116,7 +116,7 @@ spec:
         - --pool-name
         - vllm-server
         - --pool-namespace
-        - default
+        - ${NAMESPACE}
         - --pool-group
         - inference.networking.k8s.io
         - --zap-encoder

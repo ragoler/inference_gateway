@@ -63,7 +63,11 @@ GATEWAY_CLASS="${GATEWAY_CLASS:-gke-l7-rilb}"
 # MPS needs hostIPC on the pod (concurrent kernels share the GPU more fluidly than
 # TIME_SHARING's fixed per-pod slices). Derived from the sharing strategy.
 if [ "$GPU_SHARING_STRATEGY" = "MPS" ]; then HOST_IPC="true"; else HOST_IPC="false"; fi
-export BACKEND BLOCK_SIZE REPLICAS GPU_MEM_UTIL GPU_SHARING_STRATEGY GPU_MAX_SHARED GATEWAY_CLASS HOST_IPC
+# Namespace the manifests render into. Standalone runs in 'default'; the Hub overrides this
+# with the feature's own namespace. Templating ${NAMESPACE} (e.g. EPP --pool-namespace) keeps
+# the same manifests working in both.
+NAMESPACE="${NAMESPACE:-default}"
+export NAMESPACE BACKEND BLOCK_SIZE REPLICAS GPU_MEM_UTIL GPU_SHARING_STRATEGY GPU_MAX_SHARED GATEWAY_CLASS HOST_IPC
 echo "GPU demo: ${REPLICAS} pods sharing 1 GPU (${GPU_SHARING_STRATEGY}, max ${GPU_MAX_SHARED}/GPU),"
 echo "  block_size=${BLOCK_SIZE}, gpu_mem_util=${GPU_MEM_UTIL}, gateway_class=${GATEWAY_CLASS}"
 if [ "${GPU_MAX_SHARED}" -lt "${REPLICAS}" ]; then

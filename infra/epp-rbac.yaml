@@ -80,7 +80,10 @@ rules:
   resources: ["inferencepools"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["inference.networking.x-k8s.io"]
-  resources: ["inferenceobjectives"]
+  # The EPP (GAIE v1.5.0) runs cluster-scoped informers for both; without
+  # inferencemodelrewrites here the informer never syncs and the EPP stays NOT_SERVING.
+  # Must match the namespaced Role above.
+  resources: ["inferenceobjectives", "inferencemodelrewrites"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["authentication.k8s.io"]
   resources: ["tokenreviews"]

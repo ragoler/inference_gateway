@@ -20,6 +20,13 @@ spec:
         ports:
         - containerPort: 8000
         env:
+        # The app resolves the in-cluster Gateway (and lists model pods) in its own
+        # namespace. Inject it via the downward API so this works whether deployed
+        # standalone (default) or by the Hub (the feature's namespace) — no templating.
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: GATEWAY_IP
           value: "${GATEWAY_IP}"
         - name: MODEL_NAME
